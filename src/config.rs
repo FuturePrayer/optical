@@ -1,0 +1,147 @@
+use serde::Deserialize;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use crate::error::{OpticalError, Result};
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
+
+impl std::fmt::Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Protocol::Tcp => write!(f, "tcp"),
+            Protocol::Udp => write!(f, "udp"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    /// Pre-shared key in hex format: "hex:<64 hex chars>"
+    pub psk: String,
+    /// Path to ML-DSA-65 private key file
+    pub mldsa_private_key: PathBuf,
+    /// Path to ML-DSA-65 public key file
+    pub mldsa_public_key: PathBuf,
+    /// Tunnel server listen address (None = don't act as Node2)
+    pub tunnel_listen: Option<SocketAddr>,
+    /// Local port forwarders (empty = don't act as Node1)
+    #[serde(default)]
+    pub forwarders: Vec<ForwarderConfig>,
+    /// Tunnel connection parameters
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
+    /// Admin API listen address for observability (None = disabled).
+    /// Example: "127.0.0.1:9100"
+    #[serde(default)]
+    pub admin_listen: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForwarderConfig {
+    /// Local listen address
+    pub listen: SocketAddr,
+    /// Protocol to forward
+    pub proto: Protocol,
+    /// Tunnel peer address "host:port"
+    pub tunnel: String,
+    /// Final target address "host:port"
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TunnelConfig {
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval_secs: u64,
+    #[serde(default = "default_heartbeat_timeout")]
+    pub heartbeat_timeout_secs: u64,
+    #[serde(default = "default_reconnect_initial")]
+    pub reconnect_initial_secs: u64,
+    #[serde(default = "default_reconnect_max")]
+    pub reconnect_max_secs: u64,
+    #[serde(default = "default_udp_idle")]
+    pub udp_idle_secs: u64,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_secs: 15,
+            heartbeat_timeout_secs: 45,
+            reconnect_initial_secs: 1,
+            reconnect_max_secs: 30,
+            udp_idle_secs: 60,
+        }
+    }
+}
+
+fn default_heartbeat_interval() -> u64 {
+    15
+}
+fn default_heartbeat_timeout() -> u64 {
+    45
+}
+fn default_reconnect_initial() -> u64 {
+    1
+}
+fn default_reconnect_max() -> u64 {
+    30
+}
+fn default_udp_idle() -> u64 {
+    60
+}
+
+impl Config {
+    /// Load and validate config from a YAML file.
+    pub fn load(path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| OpticalError::Config(format!("failed to read config file '{path}': {e}")))?;
+        let config: Config = serde_yaml::from_str(&content)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Parse the PSK hex string into 32 raw bytes.
+    pub fn psk_bytes(&self) -> Result<[u8; 32]> {
+        let s = self
+            .psk
+            .strip_prefix("hex:")
+            .ok_or_else(|| OpticalError::Config("PSK must be in 'hex:<hex>' format".into()))?;
+        let bytes = hex::decode(s)?;
+        if bytes.len() != 32 {
+            return Err(OpticalError::Config(format!(
+                "PSK must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.forwarders.is_empty() && self.tunnel_listen.is_none() {
+            return Err(OpticalError::Config(
+                "at least one of 'forwarders' or 'tunnel_listen' must be configured".into(),
+            ));
+        }
+        // Validate PSK format early
+        self.psk_bytes()?;
+        Ok(())
+    }
+
+    /// Whether this node acts as Node1 (forwarder).
+    pub fn is_node1(&self) -> bool {
+        !self.forwarders.is_empty()
+    }
+
+    /// Whether this node acts as Node2 (tunnel server).
+    pub fn is_node2(&self) -> bool {
+        self.tunnel_listen.is_some()
+    }
+}

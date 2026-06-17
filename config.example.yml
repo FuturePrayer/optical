@@ -1,0 +1,57 @@
+# optical — post-quantum encrypted tunnel configuration
+#
+# Generate keys with:
+#   optical keygen --private-key ./keys/node.key --public-key ./keys/node.pub
+#   optical psk-gen
+#
+# Then paste the PSK hex string below.
+
+# Pre-shared key for authentication (generate with `optical psk-gen`).
+# Format: "hex:" followed by 64 hex characters (32 bytes).
+# WARNING: all nodes sharing this PSK form one trust domain.
+# If any node is compromised, the attacker can impersonate any node.
+psk: "hex:0000000000000000000000000000000000000000000000000000000000000000"
+
+# ML-DSA-65 key pair paths (generate with `optical keygen`).
+mldsa_private_key: "./keys/node.key"
+mldsa_public_key: "./keys/node.pub"
+
+# ── Node2 role: tunnel server (accept incoming tunnels) ─────────────────────
+# Omit this field to disable the Node2 role.
+tunnel_listen: "0.0.0.0:9000"
+
+# ── Node1 role: local port forwarders ───────────────────────────────────────
+# Omit or leave empty to disable the Node1 role.
+# Each forwarder listens on a local port and forwards traffic through the
+# specified tunnel to the specified final target.
+forwarders:
+  # TCP: forward local port 8080 to target 10.0.0.5:80 via tunnel at peer:9000
+  - listen: "127.0.0.1:8080"
+    proto: tcp
+    tunnel: "peer.example.com:9000"
+    target: "10.0.0.5:80"
+
+  # UDP: forward local port 5353 to target 8.8.8.8:53 via the same tunnel
+  - listen: "127.0.0.1:5353"
+    proto: udp
+    tunnel: "peer.example.com:9000"
+    target: "8.8.8.8:53"
+
+  # Another TCP forwarder through a different tunnel
+  - listen: "127.0.0.1:2222"
+    proto: tcp
+    tunnel: "other-peer.example.com:9000"
+    target: "192.168.1.100:22"
+
+# ── Tunnel parameters ───────────────────────────────────────────────────────
+tunnel:
+  heartbeat_interval_secs: 15   # send PING every N seconds
+  heartbeat_timeout_secs: 45    # close tunnel if no PONG within N seconds
+  reconnect_initial_secs: 1     # initial reconnect delay (exponential backoff)
+  reconnect_max_secs: 30        # maximum reconnect delay
+  udp_idle_secs: 60             # close UDP stream after N seconds of inactivity
+
+# ── Admin API (observability) ───────────────────────────────────────────────
+# Local HTTP endpoint for `optical status`, `optical ping`, `optical bench`.
+# Omit or set to null to disable.
+admin_listen: "127.0.0.1:9100"

@@ -1,0 +1,9 @@
+# Cargo build configuration.
+#
+# Statically link the C runtime (CRT) on Windows MSVC targets so the
+# resulting binary doesn't depend on VCRUNTIME140.dll / ucrtbase.dll
+# being installed on the target machine — useful for deploying as a
+# standalone service.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
