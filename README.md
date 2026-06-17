@@ -41,35 +41,63 @@ cargo build --release
 
 ## 快速开始
 
-### 1. 生成密钥
+### 1. 一键初始化(推荐)
 
-所有节点共享同一个 PSK 和 ML-DSA 公私钥对。
+`optical init` 会自动生成 ML-DSA-65 密钥对、随机 PSK,并从模板渲染配置文件:
 
 ```bash
-# 生成 32 字节 PSK
-optical psk-gen
-# 输出: hex:a1b2c3...
+# 用户级路径(默认,前台/开发场景)
+optical init
 
-# 生成 ML-DSA-65 密钥对
-optical keygen --private-key ./keys/node.key --public-key ./keys/node.pub
+# 系统级路径(生产/服务部署,需 root 或管理员权限)
+optical init --system
+
+# 自定义目录
+optical init --config-dir /opt/my-node
+
+# 覆盖已存在的文件
+optical init --force
 ```
 
-### 2. 编写配置
+生成的目录结构:
 
-复制 `config.example.yml` 并修改:
+```
+<base_dir>/
+├── config.yml          # 从模板生成,内含随机 PSK 和密钥路径
+└── keys/
+    ├── node.key        # ML-DSA-65 私钥(32 字节 seed)
+    └── node.pub        # ML-DSA-65 公钥(1952 字节)
+```
+
+#### 默认路径
+
+| Scope | 平台 | 路径 |
+|-------|------|------|
+| User(默认) | Linux | `$XDG_CONFIG_HOME/optical/` 或 `~/.config/optical/` |
+| User(默认) | Windows | `%APPDATA%\optical\` |
+| System | Linux | `/etc/optical/` |
+| System | Windows | `%PROGRAMDATA%\optical\` |
+
+> **私钥权限**:Linux 上 `init` 和 `keygen` 会自动将私钥设为 `0600`(仅属主可读写)。Windows 上依赖目录 ACL 继承,生产环境建议手动确认 `%PROGRAMDATA%\optical\` 的 ACL 仅限 SYSTEM 和 Administrators。
+
+### 2. 编辑配置
+
+`init` 生成的配置文件包含全部注释和示例,需根据节点角色修改:
 
 ```yaml
-# 预共享密钥(所有节点相同)
+# 预共享密钥(所有节点相同,init 已自动生成)
 psk: "hex:a1b2c3..."
 
-# ML-DSA 密钥路径
-mldsa_private_key: "./keys/node.key"
-mldsa_public_key: "./keys/node.pub"
+# ML-DSA 密钥路径(init 已自动填入)
+mldsa_private_key: "/etc/optical/keys/node.key"
+mldsa_public_key: "/etc/optical/keys/node.pub"
 
 # Node2 角色:隧道服务端(接受入站隧道)
+# 不需要此角色则删除或注释掉
 tunnel_listen: "0.0.0.0:9000"
 
 # Node1 角色:本地端口转发器
+# 不需要此角色则留空或删除整个列表
 forwarders:
   - listen: "127.0.0.1:8080"       # 本地监听
     proto: tcp                      # 协议(tcp/udp)
@@ -93,7 +121,29 @@ tunnel:
 admin_listen: "127.0.0.1:9100"
 ```
 
-### 3. 运行
+> **重要**:根据节点角色删除不需要的配置项。一个节点可同时担任 Node1 和 Node2,但至少需配置其中之一。所有节点须共享同一 PSK。
+
+### 3. 手动初始化(可选)
+
+如需对密钥和配置分别管理,也可手动操作:
+
+```bash
+# 生成 32 字节 PSK
+optical psk-gen
+# 输出: hex:a1b2c3...
+
+# 生成 ML-DSA-65 密钥对(省略路径则使用默认 user scope 路径)
+optical keygen
+# 或指定路径
+optical keygen --private-key ./keys/node.key --public-key ./keys/node.pub
+# 或使用系统级默认路径(需 root)
+optical keygen --system
+
+# 复制 config.example.yml,手动填入 PSK 和密钥路径
+cp config.example.yml config.yml
+```
+
+### 4. 运行
 
 **控制台模式**(前台运行):
 
@@ -168,11 +218,12 @@ curl http://127.0.0.1:9100/metrics
 
 | 命令 | 说明 |
 |------|------|
+| `optical init [--system\|--user\|--config-dir <dir>] [--force]` | 一键初始化:生成密钥 + PSK + 配置文件 |
 | `optical run --config <path>` | 前台运行隧道节点 |
 | `optical install --config <path>` | 安装为系统服务 |
 | `optical uninstall` | 卸载系统服务 |
 | `optical start` / `stop` / `restart` | 控制系统服务 |
-| `optical keygen --private-key <p> --public-key <p>` | 生成 ML-DSA-65 密钥对 |
+| `optical keygen [--system] [--private-key <p> --public-key <p>]` | 生成 ML-DSA-65 密钥对(省略路径用默认) |
 | `optical psk-gen` | 生成 32 字节 PSK |
 | `optical status --admin <addr>` | 查看隧道和转发器实时状态 |
 | `optical ping --admin <addr> --tunnel <addr> -c <n>` | 测量隧道延迟(RTT) |
@@ -211,7 +262,10 @@ cargo check
 开发时可使用相对路径的配置:
 
 ```bash
-# 生成开发用密钥
+# 一键初始化到当前目录
+optical init --config-dir .
+
+# 或手动生成开发用密钥
 optical keygen --private-key ./keys/dev.key --public-key ./keys/dev.pub
 optical psk-gen
 

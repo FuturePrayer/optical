@@ -58,6 +58,7 @@ src/
 ├── metrics/             # 指标采集(可观测性)
 │   ├── mod.rs           #   MetricsRegistry(全局 OnceLock)、TunnelMetrics、ForwarderMetrics
 │   └── history.rs       #   环形缓冲时间序列(10s 采样,60min 保留)
+├── paths.rs             # 平台默认路径(system/user scope)、配置模板渲染、私钥权限加固
 └── admin/               # 管理 API(可观测性)
     └── mod.rs           #   本地 HTTP-JSON 服务 + TunnelRegistry
 ```
@@ -203,6 +204,12 @@ cargo test
 # 生成开发用密钥
 cargo run -- keygen --private-key ./keys/dev.key --public-key ./keys/dev.pub
 cargo run -- psk-gen
+
+# 一键初始化节点(生成密钥 + PSK + 配置文件,默认 user scope)
+cargo run -- init
+cargo run -- init --system          # 系统级路径(需 root/管理员)
+cargo run -- init --config-dir ./my-node   # 自定义目录
+cargo run -- init --force           # 覆盖已存在的文件
 
 # 前台运行(编辑 config.example.yml 后)
 cargo run -- run --config config.example.yml

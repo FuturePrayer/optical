@@ -6,6 +6,7 @@ mod dial;
 mod error;
 mod forward;
 mod metrics;
+mod paths;
 mod proto;
 mod service;
 mod transport;
@@ -52,12 +53,35 @@ enum Commands {
     Restart,
     /// Generate a new ML-DSA-65 key pair
     Keygen {
+        /// Use system-level default paths (requires admin/root).
+        /// Mutually exclusive with explicit path overrides.
+        #[arg(long)]
+        system: bool,
         /// Output path for private key
+        /// (default: <user-dir>/keys/node.key, or <system-dir>/keys/node.key with --system)
         #[arg(long)]
-        private_key: PathBuf,
+        private_key: Option<PathBuf>,
         /// Output path for public key
+        /// (default: <user-dir>/keys/node.pub, or <system-dir>/keys/node.pub with --system)
         #[arg(long)]
-        public_key: PathBuf,
+        public_key: Option<PathBuf>,
+    },
+    /// Initialize a new node: generate keys, PSK, and a config file from the template
+    Init {
+        /// Use system-level paths (requires admin/root).
+        ///   Linux: /etc/optical/    Windows: %PROGRAMDATA%\optical\
+        #[arg(long)]
+        system: bool,
+        /// Use user-level paths (default).
+        ///   Linux: ~/.config/optical/    Windows: %APPDATA%\optical\
+        #[arg(long)]
+        user: bool,
+        /// Override the base directory for config + keys
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+        /// Overwrite existing config / key files
+        #[arg(long)]
+        force: bool,
     },
     /// Generate a random 32-byte PSK (hex-encoded)
     PskGen,
@@ -127,13 +151,19 @@ fn main() -> Result<()> {
             service::restart()?;
         }
         Commands::Keygen {
+            system,
             private_key,
             public_key,
         } => {
-            crypto::pqdsa::keygen_to_files(&private_key, &public_key)?;
-            println!("ML-DSA-65 key pair generated:");
-            println!("  private key: {}", private_key.display());
-            println!("  public key:  {}", public_key.display());
+            cli_keygen(system, private_key, public_key)?;
+        }
+        Commands::Init {
+            system,
+            user,
+            config_dir,
+            force,
+        } => {
+            cli_init(system, user, config_dir, force)?;
         }
         Commands::PskGen => {
             let psk = crypto::kdf::generate_psk();
@@ -435,6 +465,146 @@ async fn cli_bench(admin: &str, tunnel: &str, duration: u64, size: usize) -> any
         format_bytes(resp.bytes_sent),
         resp.elapsed_secs
     );
+
+    Ok(())
+}
+
+// ── keygen / init ────────────────────────────────────────────────────────────
+
+/// Resolve a default key path for the given scope, or error with guidance.
+fn resolve_default_path(
+    scope: paths::Scope,
+    f: fn(paths::Scope) -> Option<PathBuf>,
+    kind: &str,
+) -> anyhow::Result<PathBuf> {
+    f(scope).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot determine default {kind} path for {scope} scope \
+             (set HOME/APPDATA or pass --{kind} explicitly)"
+        )
+    })
+}
+
+/// `optical keygen` — generate an ML-DSA-65 key pair, defaulting to
+/// platform-appropriate paths when none are given.
+fn cli_keygen(
+    system: bool,
+    private_key: Option<PathBuf>,
+    public_key: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let scope = if system {
+        paths::Scope::System
+    } else {
+        paths::Scope::User
+    };
+
+    let private_key = match private_key {
+        Some(p) => p,
+        None => resolve_default_path(scope, paths::default_private_key_path, "private-key")?,
+    };
+    let public_key = match public_key {
+        Some(p) => p,
+        None => resolve_default_path(scope, paths::default_public_key_path, "public-key")?,
+    };
+
+    crypto::pqdsa::keygen_to_files(&private_key, &public_key)?;
+    paths::set_private_key_permissions(&private_key)?;
+
+    println!("ML-DSA-65 key pair generated:");
+    println!("  private key: {}", private_key.display());
+    println!("  public key:  {}", public_key.display());
+    if system {
+        println!("  (system scope)");
+    }
+    println!();
+    println!("To also generate a config file, run: optical init");
+
+    Ok(())
+}
+
+/// `optical init` — generate keys + PSK + config file from the template.
+fn cli_init(
+    system: bool,
+    user: bool,
+    config_dir: Option<PathBuf>,
+    force: bool,
+) -> anyhow::Result<()> {
+    if system && user {
+        anyhow::bail!("--system and --user are mutually exclusive");
+    }
+
+    let base = if let Some(dir) = config_dir {
+        dir
+    } else {
+        let scope = if system {
+            paths::Scope::System
+        } else {
+            paths::Scope::User
+        };
+        paths::base_dir(scope).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot determine default directory for {scope} scope \
+                 (set HOME/APPDATA or use --config-dir)"
+            )
+        })?
+    };
+
+    let config_path = base.join("config.yml");
+    let keys_dir = base.join("keys");
+    let priv_key = keys_dir.join("node.key");
+    let pub_key = keys_dir.join("node.pub");
+
+    // Guard against clobbering existing files unless --force.
+    if !force {
+        let mut existing = Vec::new();
+        if config_path.exists() {
+            existing.push(&config_path);
+        }
+        if priv_key.exists() {
+            existing.push(&priv_key);
+        }
+        if pub_key.exists() {
+            existing.push(&pub_key);
+        }
+        if !existing.is_empty() {
+            eprintln!("The following files already exist:");
+            for p in &existing {
+                eprintln!("  {}", p.display());
+            }
+            anyhow::bail!("refusing to overwrite existing files; use --force to proceed");
+        }
+    }
+
+    // Generate the key pair.
+    std::fs::create_dir_all(&keys_dir)?;
+    crypto::pqdsa::keygen_to_files(&priv_key, &pub_key)?;
+    paths::set_private_key_permissions(&priv_key)?;
+
+    // Generate a PSK and render the config from the template.
+    let psk = crypto::kdf::generate_psk();
+    let psk_hex = format!("hex:{}", hex::encode(psk));
+    let config_content = paths::render_config(&psk_hex, &priv_key, &pub_key);
+    std::fs::write(&config_path, config_content)?;
+
+    // Summary + reminder.
+    println!("optical — initialization complete");
+    println!();
+    println!("Generated files:");
+    println!("  config:      {}", config_path.display());
+    println!("  private key: {}", priv_key.display());
+    println!("  public key:  {}", pub_key.display());
+    println!("  PSK:         generated (embedded in config as 'hex:...')");
+    println!();
+    println!("IMPORTANT — edit the config file before starting the service:");
+    println!("  {}", config_path.display());
+    println!();
+    println!("  - Set the correct 'tunnel_listen' (Node2) and/or 'forwarders' (Node1)");
+    println!("    for this node's role; remove whichever role it should NOT play.");
+    println!("  - Share the same PSK and this node's public key with peer nodes.");
+    println!("  - Distribute peer public keys if signature verification is enabled.");
+    println!();
+    println!("Then run:");
+    println!("  optical run --config \"{}\"", config_path.display());
 
     Ok(())
 }
