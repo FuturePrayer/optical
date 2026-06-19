@@ -20,6 +20,17 @@ Node1 (Forwarder)                    Node2 (Tunnel Server)
 
 一个节点可同时扮演 Node1(前向转发)和 Node2(隧道服务端)角色。
 
+### 反向隧道
+
+上述为正向转发模式(Node1 监听 → Node2 拨号)。反向隧道模式将方向翻转:由 Node2(隧道服务端)监听端口,将连接通过隧道发回给 Node1(隧道客户端),由 Node1 拨号到目标。适用于 Node1 位于 NAT 后无公网 IP 的场景。
+
+| 模式 | 监听方 | OPEN 方向 | 拨号方 |
+|------|--------|----------|--------|
+| 正向 | Node1 | Node1→Node2 | Node2 |
+| 反向 | Node2 | Node2→Node1 | Node1 |
+
+在 forwarder 配置中设置 `reverse: true` 即可启用,Node2 侧可通过 `allow_reverse: false` 硬禁用此功能。
+
 ## 安装
 
 ### 从源码安装(推荐)
@@ -64,9 +75,10 @@ optical init --force
 ```
 <base_dir>/
 ├── config.yml          # 从模板生成,内含随机 PSK 和密钥路径
-└── keys/
-    ├── node.key        # ML-DSA-65 私钥(32 字节 seed)
-    └── node.pub        # ML-DSA-65 公钥(1952 字节)
+├── keys/
+│   ├── node.key        # ML-DSA-65 私钥(32 字节 seed)
+│   └── node.pub        # ML-DSA-65 公钥(1952 字节)
+└── logs/               # 按日滚动的日志文件(init 自动配置 log_dir 指向此处)
 ```
 
 #### 默认路径
@@ -92,9 +104,17 @@ psk: "hex:a1b2c3..."
 mldsa_private_key: "/etc/optical/keys/node.key"
 mldsa_public_key: "/etc/optical/keys/node.pub"
 
+# 日志目录(按日滚动,init 已自动填入)
+# 设为 null 或省略则仅输出到 stdout
+log_dir: "/etc/optical/logs"
+
 # Node2 角色:隧道服务端(接受入站隧道)
 # 不需要此角色则删除或注释掉
 tunnel_listen: "0.0.0.0:9000"
+
+# 是否接受对端的反向隧道注册(Node2 角色)
+# 设为 false 可在此节点硬禁用反向隧道;默认 true
+allow_reverse: true
 
 # Node1 角色:本地端口转发器
 # 不需要此角色则留空或删除整个列表
@@ -108,6 +128,14 @@ forwarders:
     proto: udp
     tunnel: "peer.example.com:9000"
     target: "8.8.8.8:53"
+
+  # 反向隧道:对端(Node2)监听 9090,连接通过隧道发回本节点(Node1)拨号
+  # 适用于本节点位于 NAT 后无公网 IP 的场景
+  - listen: "0.0.0.0:9090"
+    proto: tcp
+    tunnel: "peer.example.com:9000"
+    target: "192.168.1.100:22"
+    reverse: true
 
 # 隧道参数
 tunnel:
@@ -275,7 +303,7 @@ cargo run -- run --config config.example.yml
 
 ### 日志
 
-通过环境变量控制日志级别:
+日志级别通过 `RUST_LOG` 环境变量控制:
 
 ```bash
 # Linux/macOS
@@ -284,6 +312,8 @@ RUST_LOG=debug cargo run -- run --config config.yml
 # Windows PowerShell
 $env:RUST_LOG="debug"; cargo run -- run --config config.yml
 ```
+
+配置文件中设置 `log_dir` 后,日志在输出到 stdout 的同时额外写入按日滚动的文件(如 `optical.log.2026-06-19`),便于服务部署时留存历史日志。`init` 默认将 `log_dir` 设为 `<base>/logs`。设为 `null` 或省略则仅输出到 stdout。
 
 ## 安全说明
 
