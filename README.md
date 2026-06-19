@@ -10,7 +10,7 @@
 Node1 (Forwarder)                    Node2 (Tunnel Server)
 ┌─────────────────┐                  ┌─────────────────┐
 │ 本地端口监听     │                  │ 隧道端口监听     │
-│  (TCP/UDP)      │                  │  (TCP)          │
+│  (TCP/UDP)      │                  │  (TCP/KCP/WS)  │
 │      ↓          │   加密隧道       │      ↓          │
 │ 多路复用隧道     │ ←─────────────→ │ 多路复用隧道     │
 │      ↓          │  (PQ 握手+AEAD)  │      ↓          │
@@ -30,6 +30,18 @@ Node1 (Forwarder)                    Node2 (Tunnel Server)
 | 反向 | Node2 | Node2→Node1 | Node1 |
 
 在 forwarder 配置中设置 `reverse: true` 即可启用,Node2 侧可通过 `allow_reverse: false` 硬禁用此功能。
+
+### 传输协议
+
+隧道传输层支持三种协议,通过 `tunnel_transport`(Node2 监听)和 forwarder 的 `tunnel` 地址 URL scheme(Node1 连接)选择,两端协议必须匹配:
+
+| 协议 | Node2 配置 | Node1 `tunnel` 地址 | 适用场景 |
+|------|------------|---------------------|----------|
+| TCP | `tunnel_transport: tcp`(默认) | `host:port` 或 `tcp://host:port` | 通用,向后兼容存量配置 |
+| KCP | `tunnel_transport: kcp` | `kcp://host:port` | 延迟敏感:基于 UDP 的可靠传输,比 TCP 低 30-40% 延迟,代价是更高带宽开销 |
+| WebSocket | `tunnel_transport: ws` | `ws://host:port[/path]` | 穿越 HTTP 代理/防火墙;可接入 CDN(Flexible SSL:CDN 终止 TLS,明文 `ws://` 回源) |
+
+WebSocket 服务端对非 WebSocket 的普通 HTTP 请求返回 `200 OK` 伪装页面,使端口对外表现为普通网站,支持 CDN HTTP 健康检查(期望 200)与抗主动探测。optical 隧道自身已有 ChaCha20-Poly1305 AEAD 加密,WS 明文传输不泄露数据机密性,仅暴露流量特征。
 
 ## 安装
 
@@ -112,22 +124,35 @@ log_dir: "/etc/optical/logs"
 # 不需要此角色则删除或注释掉
 tunnel_listen: "0.0.0.0:9000"
 
+# 隧道传输协议(Node2 监听侧):tcp(默认)/kcp/ws
+# Node1 侧通过 forwarder 的 tunnel 地址 URL scheme 选择,两端必须匹配
+#   ws 可接入 CDN(Flexible SSL),非 WebSocket 的 HTTP 请求返回 200 伪装页面
+tunnel_transport: tcp
+
 # 是否接受对端的反向隧道注册(Node2 角色)
 # 设为 false 可在此节点硬禁用反向隧道;默认 true
 allow_reverse: true
 
 # Node1 角色:本地端口转发器
 # 不需要此角色则留空或删除整个列表
+# tunnel 地址可通过 URL scheme 选择传输协议(须与对端 tunnel_transport 匹配):
+#   "host:port"=TCP(默认) / "kcp://host:port" / "ws://host:port[/path]"
 forwarders:
   - listen: "127.0.0.1:8080"       # 本地监听
     proto: tcp                      # 协议(tcp/udp)
-    tunnel: "peer.example.com:9000" # 隧道对端地址
+    tunnel: "peer.example.com:9000" # 隧道对端地址(默认 TCP)
     target: "10.0.0.5:80"           # 最终目标地址
 
   - listen: "127.0.0.1:5353"
     proto: udp
     tunnel: "peer.example.com:9000"
     target: "8.8.8.8:53"
+
+  # WebSocket 传输:穿越 HTTP 代理或接入 CDN(对端须 tunnel_transport: ws)
+  - listen: "127.0.0.1:8443"
+    proto: tcp
+    tunnel: "ws://peer.example.com:9000"
+    target: "10.0.0.5:443"
 
   # 反向隧道:对端(Node2)监听 9090,连接通过隧道发回本节点(Node1)拨号
   # 适用于本节点位于 NAT 后无公网 IP 的场景

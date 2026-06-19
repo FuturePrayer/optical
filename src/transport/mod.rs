@@ -13,15 +13,23 @@
 //! 3. The existing tunnel + handshake code works unchanged because it is
 //!    generic over `impl AsyncRead + AsyncWrite + Unpin + Send`.
 
+pub mod kcp;
 pub mod tcp;
+pub mod ws;
 
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_kcp::KcpConfig;
 
+use crate::config::TransportKind;
 use crate::error::Result;
+
+use kcp::KcpTransport;
+use tcp::TcpTransport;
+use ws::WsTransport;
 
 /// A type-erased duplex stream (read + write).
 ///
@@ -62,4 +70,92 @@ pub trait Listener: Send {
     ///
     /// Returns the duplex stream and the peer's remote address.
     fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<(BoxDuplex, SocketAddr)>> + Send + '_>>;
+}
+
+/// Unified transport dispatcher: implements [`Connect`] + [`Listen`] by
+/// delegating to the concrete transport selected either by the `tunnel`
+/// address URL scheme (client side) or by [`TransportKind`] (server side).
+///
+/// `Connect`/`Listen` use `impl Future` (not dyn-compatible), so we cannot
+/// `Box<dyn Connect>`. Instead this concrete type branches at the call site,
+/// allowing a single node to use different protocols for different peers.
+///
+/// Cloning is cheap: `KcpConfig` is `Copy` and the other transports are
+/// zero-sized.
+#[derive(Clone)]
+pub struct AnyTransport {
+    /// Transport used by the *server* listener (Node2). The client side
+    /// ignores this and dispatches per-connection via the URL scheme.
+    listen_kind: TransportKind,
+    /// KCP configuration (shared by both sides; `Copy`).
+    kcp_config: KcpConfig,
+}
+
+impl AnyTransport {
+    /// Build a server-side transport that listens with `kind`.
+    pub fn for_server(kind: TransportKind) -> Self {
+        Self {
+            listen_kind: kind,
+            kcp_config: KcpConfig::default(),
+        }
+    }
+
+    /// Build a client-side transport that dispatches per `tunnel` URL scheme.
+    pub fn for_client() -> Self {
+        // listen_kind is unused on the client; default to Tcp.
+        Self {
+            listen_kind: TransportKind::Tcp,
+            kcp_config: KcpConfig::default(),
+        }
+    }
+}
+
+/// Classify a tunnel address by its URL scheme.
+///
+/// - `host:port` or `tcp://host:port` → TCP (bare form is the default for
+///   backwards compatibility with existing configs)
+/// - `kcp://host:port` → KCP
+/// - `ws://host:port[/path]` → WebSocket (the full URL is preserved since the
+///   WS client needs it to build the Host header and request target)
+///
+/// Returns `(kind, target)` where `target` is the `host:port` form for TCP/KCP
+/// and the original URL for WS.
+fn parse_transport_addr(addr: &str) -> (TransportKind, &str) {
+    if let Some(rest) = addr.strip_prefix("kcp://") {
+        (TransportKind::Kcp, rest)
+    } else if addr.starts_with("ws://") {
+        (TransportKind::Ws, addr)
+    } else if let Some(rest) = addr.strip_prefix("tcp://") {
+        (TransportKind::Tcp, rest)
+    } else {
+        (TransportKind::Tcp, addr)
+    }
+}
+
+impl Connect for AnyTransport {
+    fn connect(&self, addr: &str) -> impl Future<Output = Result<BoxDuplex>> + Send {
+        let kcp_config = self.kcp_config;
+        async move {
+            let (kind, target) = parse_transport_addr(addr);
+            match kind {
+                TransportKind::Tcp => TcpTransport.connect(target).await,
+                TransportKind::Kcp => KcpTransport::new(kcp_config).connect(target).await,
+                TransportKind::Ws => WsTransport.connect(target).await,
+            }
+        }
+    }
+}
+
+impl Listen for AnyTransport {
+    fn listen(&self, addr: SocketAddr) -> impl Future<Output = Result<Box<dyn Listener>>> + Send {
+        let kind = self.listen_kind;
+        let kcp_config = self.kcp_config;
+        async move {
+            match kind {
+                TransportKind::Tcp => TcpTransport.listen(addr).await,
+                TransportKind::Kcp => KcpTransport::new(kcp_config).listen(addr).await,
+                TransportKind::Ws => WsTransport.listen(addr).await,
+            }
+        }
+    }
 }

@@ -78,9 +78,10 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         let tunnel_cfg = config.tunnel.clone();
         let allow_reverse = config.allow_reverse;
         let rev_registry = reverse_registry.clone();
+        let tunnel_transport = config.tunnel_transport;
         handles.push(tokio::spawn(async move {
             if let Err(e) = crate::tunnel::server::run(
-                crate::transport::tcp::TcpTransport,
+                crate::transport::AnyTransport::for_server(tunnel_transport),
                 listen_addr,
                 psk,
                 dsa_keypair,
@@ -112,7 +113,7 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         let fwd_error = forwarder_error.clone();
         handles.push(tokio::spawn(async move {
             let result = crate::forward::run_forwarders(
-                crate::transport::tcp::TcpTransport,
+                crate::transport::AnyTransport::for_client(),
                 forwarders,
                 psk,
                 dsa_keypair,

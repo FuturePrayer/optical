@@ -20,6 +20,35 @@ impl std::fmt::Display for Protocol {
     }
 }
 
+/// Underlying transport protocol carrying the encrypted tunnel.
+///
+/// The client (Node1) side selects the transport via the `tunnel` address URL
+/// scheme (`tcp://`, `kcp://`, `ws://`); a bare `host:port` defaults to TCP for
+/// backwards compatibility. The server (Node2) side is selected by this config
+/// field since `tunnel_listen: SocketAddr` carries no scheme.
+///
+/// - `Tcp`: plain TCP (default)
+/// - `Kcp`: reliable low-latency UDP over KCP (tokio-kcp)
+/// - `Ws`:  WebSocket, traverses HTTP proxies/firewalls (tokio-tungstenite)
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    #[default]
+    Tcp,
+    Kcp,
+    Ws,
+}
+
+impl std::fmt::Display for TransportKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportKind::Tcp => write!(f, "tcp"),
+            TransportKind::Kcp => write!(f, "kcp"),
+            TransportKind::Ws => write!(f, "ws"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// Pre-shared key in hex format: "hex:<64 hex chars>"
@@ -30,6 +59,11 @@ pub struct Config {
     pub mldsa_public_key: PathBuf,
     /// Tunnel server listen address (None = don't act as Node2)
     pub tunnel_listen: Option<SocketAddr>,
+    /// Transport protocol for the tunnel *listener* (Node2 side). The client
+    /// (Node1) side instead selects transport per-forwarder via the `tunnel`
+    /// address URL scheme. Default: `tcp` (backwards compatible).
+    #[serde(default)]
+    pub tunnel_transport: TransportKind,
     /// Local port forwarders (empty = don't act as Node1)
     #[serde(default)]
     pub forwarders: Vec<ForwarderConfig>,

@@ -38,8 +38,10 @@ src/
 │   ├── aead.rs          #   ChaCha20-Poly1305 AEAD 加解密
 │   └── handshake.rs     #   PQ 握手协议(ClientHello/ServerHello/Finished)
 ├── transport/           # 传输层抽象
-│   ├── mod.rs           #   Connect/Listen trait + Duplex 类型别名
-│   └── tcp.rs           #   TCP 传输实现
+│   ├── mod.rs           #   Connect/Listen trait + Duplex 类型别名 + AnyTransport 调度器(按 URL scheme/listen_kind 分发)
+│   ├── tcp.rs           #   TCP 传输实现
+│   ├── kcp.rs           #   KCP 传输实现(tokio-kcp,KcpStream 已实现 AsyncRead/Write)
+│   └── ws.rs            #   WebSocket 传输(tokio-tungstenite)+ WsDuplex 适配层(Stream/Sink→AsyncRead/Write)+ 200 伪装响应
 ├── proto/               # 隧道协议
 │   ├── frame.rs         #   帧类型定义与编解码(15B header + AEAD payload)
 │   └── stream.rs        #   多路复用流句柄、双向复制
@@ -97,6 +99,14 @@ src/
 ### 传输层抽象 (transport/)
 
 `Connect` 和 `Listen` trait 解耦隧道 I/O 与底层网络协议。新增传输(如 KCP)只需实现这两个 trait,返回 `BoxDuplex`(`Box<dyn Duplex>`),隧道代码无需修改。
+
+当前内置三种传输,均通过 `AnyTransport` 统一调度(`transport/mod.rs`):
+
+- **TCP**(`tcp.rs`):默认,向后兼容存量配置
+- **KCP**(`kcp.rs`):基于 tokio-kcp 的可靠低延迟 UDP,延迟比 TCP 低 30-40%。`KcpStream` 已实现 `AsyncRead/AsyncWrite`,无需适配层
+- **WebSocket**(`ws.rs`):基于 tokio-tungstenite,穿越 HTTP 代理/防火墙,可接入 CDN(Flexible SSL:CDN 终止 TLS,明文 `ws://` 回源)。`WsDuplex` 适配层把 `WebSocketStream` 的 `Stream`/`Sink` 适配为 `AsyncRead`/`AsyncWrite`(读缓冲用 `VecDeque<Bytes>` 零拷贝优化);服务端 `WsTransportListener::accept` 用 `TcpStream::peek` 预判 WS 升级请求,非 WS 的 HTTP 请求返回 200 伪装页面(抗探测 + CDN HTTP 健康检查)。所有连接强制 `TCP_NODELAY`(避免 Nagle 给小帧加 40ms 延迟)
+
+客户端通过 `tunnel` 地址 URL scheme(`tcp://`/`kcp://`/`ws://`,无 scheme 默认 TCP)选择;服务端通过 `Config.tunnel_transport` 字段(`TransportKind` enum,serde 默认 Tcp)选择。两端协议必须匹配,不匹配时连接失败(预期行为)。Transport 是隧道之下的承载层,不触碰帧协议和 PQ 握手协议,故新增传输不受协议兼容性红线约束。
 
 ### 反向隧道 (forward/reverse.rs)
 
@@ -180,10 +190,12 @@ src/
 
 ### 新增传输协议
 
-1. `transport/` 下新建模块,实现 `Connect` 和/或 `Listen` trait
-2. 返回 `BoxDuplex`
-3. 在 `app.rs` 中将 `TcpTransport` 替换为新传输(或按配置选择)
-4. 隧道和握手代码无需修改(已泛型化)
+1. `transport/` 下新建模块,实现 `Connect` 和/或 `Listen` trait,返回 `BoxDuplex`
+2. 在 `transport/mod.rs` 的 `AnyTransport` 分发中注册:
+   - 客户端:在 `parse_transport_addr` 加 URL scheme 识别,在 `Connect::connect` 的 match 加 arm
+   - 服务端:在 `config.rs` 的 `TransportKind` enum 加变体,在 `Listen::listen` 的 match 加 arm
+3. 隧道和握手代码无需修改(已泛型化);`app.rs` 用 `AnyTransport::for_server/for_client`,无需改动
+4. 如传输底层为 TCP(如 WS),务必在连接建立后 `set_nodelay(true)`,否则 Nagle 给小帧(Ping/握手)引入最多 40ms 延迟,致命
 
 ## 注意事项
 

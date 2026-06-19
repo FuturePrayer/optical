@@ -1,6 +1,6 @@
 [package]
 name = "optical"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Post-quantum encrypted tunnel forwarding tool (ML-KEM + ML-DSA + PSK)"
 license = "Apache-2.0"
@@ -47,6 +47,10 @@ semver = "1"
 # Misc
 futures = "0.3"
 zeroize = { version = "1", features = ["derive"] }
+
+# Transports: KCP (reliable low-latency UDP) and WebSocket (HTTP proxy / firewall traversal)
+tokio_kcp = "0.9"
+tokio-tungstenite = "0.29"
 
 # Platform-specific: Windows Service Control Manager integration
 [target.'cfg(windows)'.dependencies]

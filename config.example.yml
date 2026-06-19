@@ -26,6 +26,19 @@ log_dir: "./logs"
 # Omit this field to disable the Node2 role.
 tunnel_listen: "0.0.0.0:9000"
 
+# Transport protocol carrying the tunnel on the Node2 *listener*. The client
+# (Node1) side instead selects transport per-forwarder via the `tunnel` address
+# URL scheme (see forwarders below). Options:
+#   tcp — plain TCP (default, backwards compatible)
+#   kcp — reliable low-latency UDP (tokio-kcp), ~30-40% lower latency than TCP
+#   ws  — WebSocket (tokio-tungstenite); traverses HTTP proxies/firewalls and
+#         can sit behind a CDN (Flexible SSL: CDN terminates TLS, plain ws://
+#         backhauls here). Non-WebSocket HTTP requests to this port receive a
+#         200 OK page so the port looks like an ordinary website and passes
+#         CDN HTTP health checks.
+# Default: tcp. The client's `tunnel` scheme must match this.
+tunnel_transport: tcp
+
 # Whether to accept reverse tunnel registrations from peers.
 # When false, incoming RegisterReverse frames are rejected with status=disabled
 # and the requesting Node1 will exit with an error.
@@ -36,6 +49,13 @@ allow_reverse: true
 # Omit or leave empty to disable the Node1 role.
 # Each forwarder listens on a local port and forwards traffic through the
 # specified tunnel to the specified final target.
+#
+# The `tunnel` address selects the transport via an optional URL scheme:
+#   "host:port"             → TCP (default, backwards compatible)
+#   "tcp://host:port"       → TCP (explicit)
+#   "kcp://host:port"       → KCP (reliable low-latency UDP)
+#   "ws://host:port[/path]" → WebSocket (HTTP proxy/CDN traversal)
+# The peer (Node2) must listen with the matching `tunnel_transport` above.
 #
 # Set `reverse: true` to flip the direction: the peer (Node2) listens on
 # `listen` and sends connections back through the tunnel to this node (Node1),
@@ -77,6 +97,13 @@ forwarders:
     tunnel: "peer.example.com:9000"
     target: "192.168.1.1:53"
     reverse: true
+
+  # WebSocket transport: traverse an HTTP proxy or sit behind a CDN. The peer
+  # Node2 must set `tunnel_transport: ws`. The ws:// URL may carry a path.
+  - listen: "127.0.0.1:8443"
+    proto: tcp
+    tunnel: "ws://peer.example.com:9000"
+    target: "10.0.0.5:443"
 
 # ── Tunnel parameters ───────────────────────────────────────────────────────
 tunnel:
