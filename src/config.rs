@@ -115,6 +115,18 @@ pub struct TunnelConfig {
     pub reconnect_max_secs: u64,
     #[serde(default = "default_udp_idle")]
     pub udp_idle_secs: u64,
+    /// Timeout (seconds) for dialing a target after receiving an OPEN request
+    /// (Node2 → final target, or Node1 → target in reverse mode). Prevents
+    /// unreachable targets from holding stream IDs and tasks indefinitely.
+    /// Default: 10.
+    #[serde(default = "default_dial_timeout")]
+    pub dial_timeout_secs: u64,
+    /// Timeout (seconds) for waiting on an OPEN_ACK after sending an OPEN
+    /// frame (Node1 → Node2, or Node2 → Node1 in reverse mode). Prevents a
+    /// stalled peer dial from hanging the local connection indefinitely.
+    /// Default: 15.
+    #[serde(default = "default_open_ack_timeout")]
+    pub open_ack_timeout_secs: u64,
 }
 
 impl Default for TunnelConfig {
@@ -125,6 +137,8 @@ impl Default for TunnelConfig {
             reconnect_initial_secs: 1,
             reconnect_max_secs: 30,
             udp_idle_secs: 60,
+            dial_timeout_secs: 10,
+            open_ack_timeout_secs: 15,
         }
     }
 }
@@ -143,6 +157,12 @@ fn default_reconnect_max() -> u64 {
 }
 fn default_udp_idle() -> u64 {
     60
+}
+fn default_dial_timeout() -> u64 {
+    10
+}
+fn default_open_ack_timeout() -> u64 {
+    15
 }
 fn default_true() -> bool {
     true

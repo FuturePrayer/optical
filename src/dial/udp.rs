@@ -1,6 +1,7 @@
 //! UDP dialer: dials a UDP target on receiving an OPEN frame.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -12,20 +13,34 @@ use crate::proto::stream::{OutboundFrame, StreamIn};
 use crate::tunnel::Tunnel;
 
 /// Dial a UDP target and forward datagrams bidirectionally through the tunnel stream.
+///
+/// `dial_timeout` bounds the target address resolution and local socket bind
+/// so a stalled DNS lookup cannot hold the stream ID and task indefinitely.
 pub async fn dial_and_forward(
     target: &str,
     tunnel: &Tunnel,
     stream_id: u32,
     _cancel: CancellationToken,
+    dial_timeout: Duration,
 ) -> Result<()> {
-    // Resolve target address
-    let target_addr = tokio::net::lookup_host(target)
-        .await?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("failed to resolve UDP target: {}", target))?;
-
-    // Bind a local UDP socket for communicating with the target
-    let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    // Resolve target address + bind local socket, bounded by dial_timeout
+    let (target_addr, socket) = match tokio::time::timeout(dial_timeout, async {
+        let target_addr = tokio::net::lookup_host(target)
+            .await?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("failed to resolve UDP target: {}", target))?;
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        anyhow::Ok((target_addr, socket))
+    })
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            anyhow::bail!("UDP dial to {} timed out after {:?}", target, dial_timeout);
+        }
+    };
+    let socket = Arc::new(socket);
     tracing::debug!(stream_id, "UDP dialed target: {} → {}", target_addr, socket.local_addr()?);
 
     // Accept stream on tunnel

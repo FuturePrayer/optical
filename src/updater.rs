@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::service;
 
@@ -109,6 +110,27 @@ pub fn run_update(check: bool, force: bool, restart: bool) -> Result<()> {
             )
         })?;
 
+    // Find the SHA256 checksum asset published alongside the binary by the
+    // release CI. Refusing to update without integrity verification guards
+    // against a compromised GitHub account or CDN serving a tampered binary.
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == format!("{ASSET_NAME}.sha256"))
+        .ok_or_else(|| {
+            anyhow!(
+                "no SHA256 checksum asset matching '{ASSET_NAME}.sha256' found. \
+                 Refusing to update without integrity verification. \
+                 Available assets: [{}]",
+                release
+                    .assets
+                    .iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+
     println!(
         "  downloading {} ({}) ...",
         asset.name,
@@ -120,6 +142,18 @@ pub fn run_update(check: bool, force: bool, restart: bool) -> Result<()> {
     let exe_path = current_exe_path()?;
     let temp_path = make_temp_path(&exe_path);
     download_asset(&asset.browser_download_url, &temp_path)?;
+
+    // Verify SHA256 integrity before replacing the running binary.
+    let expected_hash = fetch_checksum(&checksum_asset.browser_download_url)?;
+    if let Err(e) = verify_sha256(&temp_path, &expected_hash) {
+        // Keep the downloaded temp file for manual inspection.
+        eprintln!("  integrity verification FAILED; keeping downloaded file for inspection:");
+        eprintln!("    {}", temp_path.display());
+        return Err(e).context(
+            "SHA256 mismatch — refusing to install a binary that failed integrity verification",
+        );
+    }
+    println!("  SHA256 verified OK");
 
     // Replace the running binary (platform-specific).
     replace_binary(&exe_path, &temp_path)?;
@@ -228,6 +262,52 @@ fn download_asset(url: &str, dest: &Path) -> Result<()> {
         let _ = fs::remove_file(dest);
     }
     result
+}
+
+/// Fetch the SHA256 checksum asset (a small text file) and extract the hex hash.
+///
+/// The file is produced by `sha256sum` in the release CI, with the format
+/// `<64 hex chars>  <filename>`. Only the leading 64 hex chars are used.
+fn fetch_checksum(url: &str) -> Result<String> {
+    let agent = build_agent();
+    let response = agent
+        .get(url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e| anyhow!("checksum download request failed: {e}"))?;
+
+    let mut body = String::new();
+    response
+        .into_body()
+        .into_reader()
+        .read_to_string(&mut body)
+        .map_err(|e| anyhow!("failed to read checksum response: {e}"))?;
+
+    // sha256sum format: "<hash>  <filename>" — take the first whitespace-delimited token.
+    let hash = body
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("checksum file is empty or malformed"))?;
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "checksum file does not contain a valid 64-char hex SHA256: got '{hash}'"
+        );
+    }
+    Ok(hash.to_ascii_lowercase())
+}
+
+/// Compute the SHA256 of the file at `path` and compare against `expected`
+/// (lowercase hex). Returns an error on mismatch.
+fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to open downloaded file {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).context("failed to hash downloaded file")?;
+    let actual = hex::encode(hasher.finalize());
+    if actual != expected {
+        anyhow::bail!("SHA256 mismatch: expected {expected}, computed {actual}");
+    }
+    Ok(())
 }
 
 /// Replace the running binary with the downloaded one (platform-specific).

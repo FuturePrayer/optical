@@ -504,10 +504,19 @@ async fn writer_task<W>(
                     }
                 };
 
-                // Encrypt
+                // Encrypt. Failure is fatal: we must NOT write the header
+                // (which advertises `payload_len + TAG_SIZE` ciphertext bytes)
+                // with an empty/short body, otherwise the peer's frame parser
+                // desyncs and all subsequent frames are misread. Tear down.
                 let ct_len = (frame.payload.len() + TAG_SIZE) as u16;
                 let header = build_header(frame.stream_id, counter, frame.frame_type, ct_len);
-                let ciphertext = send_cipher.encrypt(frame.stream_id, counter, &header, &frame.payload);
+                let ciphertext = match send_cipher.encrypt(frame.stream_id, counter, &header, &frame.payload) {
+                    Ok(ct) => ct,
+                    Err(e) => {
+                        tracing::error!(stream_id = frame.stream_id, "AEAD encrypt failed: {e}, closing tunnel");
+                        break;
+                    }
+                };
 
                 // Write header + ciphertext
                 if writer.write_all(&header).await.is_err() {
@@ -570,12 +579,16 @@ async fn reader_task<R>(
                 .fetch_add((HEADER_SIZE + ciphertext.len()) as u64, Ordering::Relaxed);
         }
 
-        // Decrypt
+        // Decrypt. On a reliable transport (TCP/KCP/WS-over-TCP), a decrypt
+        // failure almost certainly indicates tampering or a bug. Following
+        // the TLS principle ("AEAD-fail ⟹ disconnect"), we tear down the
+        // tunnel rather than silently dropping the frame (which would allow
+        // unbounded probing).
         let plaintext = match recv_cipher.decrypt(stream_id, counter, &header, &ciphertext) {
             Ok(p) => p,
             Err(_) => {
-                tracing::warn!(stream_id, "AEAD decrypt failed, dropping frame");
-                continue;
+                tracing::error!(stream_id, "AEAD decrypt failed, closing tunnel");
+                break;
             }
         };
 

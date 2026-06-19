@@ -34,13 +34,17 @@ impl AeadCipher {
 
     /// Encrypt plaintext with AAD. Returns ciphertext + 16-byte tag.
     /// `aad` is the frame header (stream_id + counter + frame_type + payload_len).
-    pub fn encrypt(&self, stream_id: u32, counter: u64, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    ///
+    /// Encrypt failure is fatal: returning an empty Vec would desync the
+    /// frame boundary (header advertises `payload_len + TAG_SIZE` bytes but
+    /// the body would be empty), so the caller must treat any error as a
+    /// hard failure and tear down the tunnel.
+    pub fn encrypt(&self, stream_id: u32, counter: u64, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
         let nonce = Self::build_nonce(stream_id, counter);
         let nonce = Nonce::from_slice(&nonce);
         self.cipher
             .encrypt(nonce, chacha20poly1305::aead::Payload { msg: plaintext, aad })
             .map_err(|e| OpticalError::Crypto(format!("AEAD encrypt failed: {e}")))
-            .unwrap_or_else(|_| Vec::new()) // encrypt failure is fatal
     }
 
     /// Decrypt ciphertext+tag with AAD. Returns plaintext.

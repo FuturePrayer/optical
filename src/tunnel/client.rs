@@ -186,7 +186,8 @@ async fn maintain_connection<C: Connect>(
             // reverse listener). Also drain the reverse_rx — the client
             // never receives RegisterReverse frames.
             let cancel = cancel.clone();
-            tokio::spawn(dial::handle_incoming_opens(tunnel.clone(), open_rx, cancel));
+            let dial_timeout = Duration::from_secs(config.dial_timeout_secs);
+            tokio::spawn(dial::handle_incoming_opens(tunnel.clone(), open_rx, cancel, dial_timeout));
             tokio::spawn(drain_reverse_rx(reverse_rx));
 
             Ok::<Tunnel, anyhow::Error>(tunnel)

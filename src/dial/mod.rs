@@ -3,6 +3,8 @@
 pub mod tcp;
 pub mod udp;
 
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -12,10 +14,13 @@ use crate::tunnel::Tunnel;
 /// Process incoming OPEN requests from the tunnel.
 ///
 /// For each OPEN, spawns a task that dials the target and forwards traffic.
+/// `dial_timeout` bounds each dial attempt so an unreachable target cannot
+/// hold the stream ID and task indefinitely.
 pub async fn handle_incoming_opens(
     tunnel: Tunnel,
     mut open_rx: mpsc::Receiver<IncomingOpen>,
     cancel: CancellationToken,
+    dial_timeout: Duration,
 ) {
     tracing::info!("processing incoming OPEN requests");
 
@@ -32,8 +37,8 @@ pub async fn handle_incoming_opens(
 
         tokio::spawn(async move {
             let result = match proto_byte {
-                0x01 => tcp::dial_and_forward(&target, &tunnel, stream_id, cancel).await,
-                0x02 => udp::dial_and_forward(&target, &tunnel, stream_id, cancel).await,
+                0x01 => tcp::dial_and_forward(&target, &tunnel, stream_id, cancel, dial_timeout).await,
+                0x02 => udp::dial_and_forward(&target, &tunnel, stream_id, cancel, dial_timeout).await,
                 _ => {
                     tracing::warn!(stream_id, "unknown protocol byte: {proto_byte}");
                     let _ = tunnel.send_open_ack(stream_id, false).await;

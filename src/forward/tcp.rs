@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
@@ -16,11 +17,15 @@ use crate::tunnel::client::TunnelClient;
 use crate::tunnel::Tunnel;
 
 /// Run a TCP forwarder: listen on `listen`, forward to `target` via tunnel.
+///
+/// `open_ack_timeout` bounds the wait for the peer's OPEN_ACK after sending an
+/// OPEN frame, so a stalled peer dial cannot hang the local connection.
 pub async fn run(
     listen: SocketAddr,
     target: String,
     tunnel_client: Arc<Mutex<TunnelClient>>,
     cancel: CancellationToken,
+    open_ack_timeout: Duration,
 ) -> Result<()> {
     let listener = TcpListener::bind(listen).await?;
     tracing::info!("TCP forwarder: {} → via tunnel → {}", listen, target);
@@ -53,7 +58,7 @@ pub async fn run(
 
                 tokio::spawn(async move {
                     tracing::debug!("TCP forward: new connection from {}", peer);
-                    if let Err(e) = handle_connection(local_stream, target, tc, cancel, metrics.clone()).await {
+                    if let Err(e) = handle_connection(local_stream, target, tc, cancel, metrics.clone(), open_ack_timeout).await {
                         tracing::debug!("TCP forward from {} error: {e}", peer);
                     }
                     // Decrement active streams on exit
@@ -75,6 +80,7 @@ async fn handle_connection(
     tunnel_client: Arc<Mutex<TunnelClient>>,
     _cancel: CancellationToken,
     metrics: Option<Arc<metrics::ForwarderMetrics>>,
+    open_ack_timeout: Duration,
 ) -> Result<()> {
     // Get tunnel (waits for connection if needed)
     let tunnel = {
@@ -88,7 +94,7 @@ async fn handle_connection(
         }
     };
 
-    forward_via_tunnel(local, target, tunnel, metrics).await
+    forward_via_tunnel(local, target, tunnel, metrics, open_ack_timeout).await
 }
 
 /// Core TCP forwarding: open a stream to `target` via `tunnel`, wait for
@@ -96,11 +102,15 @@ async fn handle_connection(
 ///
 /// Used by both the normal forwarder (via [`TunnelClient`]) and the reverse
 /// listener (via [`Tunnel`] directly).
+///
+/// `open_ack_timeout` bounds the OPEN_ACK wait so a stalled peer dial cannot
+/// hang the local connection indefinitely.
 pub async fn forward_via_tunnel(
     local: tokio::net::TcpStream,
     target: String,
     tunnel: Tunnel,
     metrics: Option<Arc<metrics::ForwarderMetrics>>,
+    open_ack_timeout: Duration,
 ) -> Result<()> {
     // Open stream
     let handle = tunnel
@@ -111,18 +121,28 @@ pub async fn forward_via_tunnel(
     let tx = handle.tx.clone();
     let mut rx = handle.rx;
 
-    // Wait for OPEN_ACK
-    match rx.recv().await {
-        Some(StreamIn::OpenAck(true)) => {
+    // Wait for OPEN_ACK (bounded by open_ack_timeout)
+    match tokio::time::timeout(open_ack_timeout, rx.recv()).await {
+        Ok(Some(StreamIn::OpenAck(true))) => {
             tracing::debug!(stream_id, "stream opened to {}", target);
         }
-        Some(StreamIn::OpenAck(false)) => {
+        Ok(Some(StreamIn::OpenAck(false))) => {
             tracing::warn!(stream_id, "stream to {} refused by remote", target);
             tunnel.remove_stream(stream_id);
             return Ok(());
         }
-        _ => {
+        Ok(None) | Ok(Some(StreamIn::Data(_))) | Ok(Some(StreamIn::Close)) => {
             tracing::warn!(stream_id, "stream to {} closed before ack", target);
+            tunnel.remove_stream(stream_id);
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::warn!(
+                stream_id,
+                "stream to {} open_ack timeout after {:?}, closing",
+                target,
+                open_ack_timeout
+            );
             tunnel.remove_stream(stream_id);
             return Ok(());
         }

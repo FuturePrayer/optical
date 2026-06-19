@@ -105,6 +105,10 @@ pub async fn run<L: Listen>(
                     match server_handshake(&mut stream, psk, dsa_keypair).await {
                         Ok(handshake) => {
                             let udp_idle_secs = config.udp_idle_secs;
+                            let dial_timeout =
+                                std::time::Duration::from_secs(config.dial_timeout_secs);
+                            let open_ack_timeout =
+                                std::time::Duration::from_secs(config.open_ack_timeout_secs);
 
                             // Register server-side tunnel metrics keyed by the
                             // peer's TCP address, so `optical status` shows
@@ -133,6 +137,7 @@ pub async fn run<L: Listen>(
                                 tunnel,
                                 open_rx,
                                 cancel,
+                                dial_timeout,
                             ));
 
                             // Process incoming RegisterReverse requests
@@ -142,6 +147,7 @@ pub async fn run<L: Listen>(
                                 allow_reverse,
                                 registry,
                                 udp_idle_secs,
+                                open_ack_timeout,
                                 cancel_for_reverse,
                             ));
 

@@ -64,10 +64,16 @@ jobs:
           cp "target/${{ matrix.target }}/release-perf/optical" "${{ matrix.asset_name }}"
           chmod +x "${{ matrix.asset_name }}"
 
+      - name: Generate SHA256 checksum
+        shell: bash
+        run: sha256sum "${{ matrix.asset_name }}" > "${{ matrix.asset_name }}.sha256"
+
       - name: Upload asset to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset_name }}
+          files: |
+            ${{ matrix.asset_name }}
+            ${{ matrix.asset_name }}.sha256
           generate_release_notes: true
           # Tags containing "-" after the version (e.g. v0.1.0-rc1) are prereleases.
           prerelease: ${{ contains(github.ref_name, '-') }}

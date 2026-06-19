@@ -112,6 +112,8 @@ tunnel:
   reconnect_initial_secs: 1     # initial reconnect delay (exponential backoff)
   reconnect_max_secs: 30        # maximum reconnect delay
   udp_idle_secs: 60             # close UDP stream after N seconds of inactivity
+  dial_timeout_secs: 10         # timeout (seconds) for dialing a target after an OPEN
+  open_ack_timeout_secs: 15     # timeout (seconds) for waiting on an OPEN_ACK from the peer
 
 # ── Admin API (observability) ───────────────────────────────────────────────
 # Local HTTP endpoint for `optical status`, `optical ping`, `optical bench`.

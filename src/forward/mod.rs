@@ -92,11 +92,12 @@ pub async fn run_forwarders<C: Connect>(
             let proto = fwd.proto;
             let listen = fwd.listen;
             let target = fwd.target.clone();
+            let open_ack_timeout = std::time::Duration::from_secs(tunnel_config.open_ack_timeout_secs);
 
             handles.push(tokio::spawn(async move {
                 match proto {
                     crate::config::Protocol::Tcp => {
-                        if let Err(e) = tcp::run(listen, target, tc, cancel).await {
+                        if let Err(e) = tcp::run(listen, target, tc, cancel, open_ack_timeout).await {
                             tracing::error!("TCP forwarder on {} error: {e:#}", listen);
                         }
                     }
@@ -128,9 +129,19 @@ pub async fn run_forwarders<C: Connect>(
         }
     }
 
-    // Wait for all handles (they exit when cancel is triggered)
+    // Wait for all handles (they exit when cancel is triggered). Bound each
+    // join with a timeout so a stuck task cannot block shutdown indefinitely.
+    let drain_timeout = std::time::Duration::from_secs(30);
     for handle in handles {
-        let _ = handle.await;
+        match tokio::time::timeout(drain_timeout, handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!(
+                    "forwarder task did not exit within {:?} during shutdown, abandoning",
+                    drain_timeout
+                );
+            }
+        }
     }
 
     // If a reverse registration had a fatal error, return it

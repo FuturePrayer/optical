@@ -142,8 +142,20 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
     cancel.cancelled().await;
     tracing::info!("shutdown triggered, draining tasks...");
 
+    // Drain each task with a bounded timeout. A stuck dial (now bounded by
+    // dial_timeout/open_ack_timeout) or a slow peer should not block shutdown
+    // indefinitely — systemd/SCM would otherwise force-kill the service.
+    let drain_timeout = std::time::Duration::from_secs(30);
     for handle in handles {
-        let _ = handle.await;
+        match tokio::time::timeout(drain_timeout, handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!(
+                    "task did not exit within {:?} during shutdown, abandoning",
+                    drain_timeout
+                );
+            }
+        }
     }
 
     tracing::info!("optical shutdown complete");

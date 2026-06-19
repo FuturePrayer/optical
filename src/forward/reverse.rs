@@ -102,6 +102,7 @@ pub async fn handle_reverse_requests(
     allow_reverse: bool,
     registry: Arc<ReverseRegistry>,
     udp_idle_secs: u64,
+    open_ack_timeout: Duration,
     cancel: CancellationToken,
 ) {
     tracing::info!("processing incoming RegisterReverse requests");
@@ -199,6 +200,7 @@ pub async fn handle_reverse_requests(
                     registry_clone,
                     tunnel_cancel,
                     listener_cancel,
+                    open_ack_timeout,
                 ));
             }
             0x02 => {
@@ -239,6 +241,7 @@ pub async fn handle_reverse_requests(
                     tunnel_cancel,
                     listener_cancel,
                     udp_idle,
+                    open_ack_timeout,
                 ));
             }
             _ => {
@@ -270,6 +273,7 @@ async fn run_reverse_tcp_listener(
     registry: Arc<ReverseRegistry>,
     tunnel_cancel: CancellationToken,
     listener_cancel: CancellationToken,
+    open_ack_timeout: Duration,
 ) {
     loop {
         tokio::select! {
@@ -289,7 +293,7 @@ async fn run_reverse_tcp_listener(
                 tokio::spawn(async move {
                     tracing::debug!("reverse TCP: new connection from {}", peer);
                     if let Err(e) = crate::forward::tcp::forward_via_tunnel(
-                        local_stream, target, tunnel, None,
+                        local_stream, target, tunnel, None, open_ack_timeout,
                     )
                     .await
                     {
@@ -319,6 +323,7 @@ async fn run_reverse_udp_listener(
     tunnel_cancel: CancellationToken,
     listener_cancel: CancellationToken,
     udp_idle: Duration,
+    open_ack_timeout: Duration,
 ) {
     let socket = Arc::new(socket);
     let sessions: Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<Bytes>>>> =
@@ -366,7 +371,7 @@ async fn run_reverse_udp_listener(
 
                         tokio::spawn(async move {
                             if let Err(e) = crate::forward::udp::udp_session_with_tunnel(
-                                socket, src, target, tunnel, sessions, data_rx, udp_idle, cancel, None,
+                                socket, src, target, tunnel, sessions, data_rx, udp_idle, cancel, None, open_ack_timeout,
                             )
                             .await
                             {

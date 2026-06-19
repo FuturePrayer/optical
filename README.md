@@ -169,6 +169,8 @@ tunnel:
   reconnect_initial_secs: 1
   reconnect_max_secs: 30
   udp_idle_secs: 60
+  dial_timeout_secs: 10        # 收到 OPEN 后拨号目标的超时(秒),默认 10
+  open_ack_timeout_secs: 15    # 等待对端 OPEN_ACK 的超时(秒),默认 15
 
 # 管理 API(可观测性,可选)
 admin_listen: "127.0.0.1:9100"
@@ -306,20 +308,23 @@ optical update --restart
 ### 工作原理
 
 1. 查询 GitHub Releases API 获取最新版本号,与编译期嵌入的当前版本做语义化版本比较
-2. 从 Release assets 中匹配当前平台的二进制文件,流式下载到临时文件
-3. 原地替换:
+2. 从 Release assets 中匹配当前平台的二进制文件及其 `.sha256` 校验文件,流式下载二进制到临时文件
+3. **下载后计算 SHA256 并与 `.sha256` 文件比对,不匹配则拒绝替换**(保留临时文件供排查),防止 GitHub 账号被盗或 CDN 投毒导致任意代码执行
+4. 原地替换:
    - **Windows**:将运行中的 exe 重命名为 `.bak`,写入新 exe(`.bak` 在下次更新时自动清理)
    - **Linux**:写入同目录临时文件后原子 `rename`,并复制原文件权限位
-4. `--restart` 标志会调用 `service::restart()` 重启已注册的系统服务
+5. `--restart` 标志会调用 `service::restart()` 重启已注册的系统服务
 
 ### 发布约定
 
 GitHub Release 的 asset 按以下命名约定上传(由 [GitHub Actions 工作流](.github/workflows/release.yml) 自动完成):
 
-| 平台 | Asset 文件名 |
-|------|-------------|
-| Windows x86_64 | `optical-x86_64-pc-windows-msvc.exe` |
-| Linux x86_64 | `optical-x86_64-unknown-linux-musl` |
+| 平台 | 二进制 Asset | SHA256 校验文件 |
+|------|-------------|----------------|
+| Windows x86_64 | `optical-x86_64-pc-windows-msvc.exe` | `optical-x86_64-pc-windows-msvc.exe.sha256` |
+| Linux x86_64 | `optical-x86_64-unknown-linux-musl` | `optical-x86_64-unknown-linux-musl.sha256` |
+
+每个二进制 asset 旁都会发布同名的 `.sha256` 文件(由 `sha256sum` 生成),`optical update` 下载后据此校验完整性。
 
 > Linux 发布版使用 musl 静态链接,零 glibc 依赖,可在任意 Linux 发行版上运行(无需关心系统 GLIBC 版本)。本项目所有依赖(含 TLS)均为纯 Rust 实现,无 C 库依赖。
 

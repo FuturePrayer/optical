@@ -42,6 +42,7 @@ pub async fn run(
         Arc::new(Mutex::new(HashMap::new()));
 
     let udp_idle = Duration::from_secs(config.udp_idle_secs);
+    let open_ack_timeout = Duration::from_secs(config.open_ack_timeout_secs);
     let mut buf = [0u8; 65535];
 
     loop {
@@ -94,7 +95,7 @@ pub async fn run(
 
                         tokio::spawn(async move {
                             if let Err(e) = udp_session(
-                                socket, src, target, tc, sessions, data_rx, udp_idle, cancel, metrics.clone(),
+                                socket, src, target, tc, sessions, data_rx, udp_idle, cancel, metrics.clone(), open_ack_timeout,
                             ).await {
                                 tracing::debug!("UDP session {} error: {e}", src);
                             }
@@ -124,6 +125,7 @@ async fn udp_session(
     udp_idle: Duration,
     cancel: CancellationToken,
     metrics: Option<Arc<ForwarderMetrics>>,
+    open_ack_timeout: Duration,
 ) -> Result<()> {
     // Get tunnel
     let tunnel = {
@@ -138,13 +140,16 @@ async fn udp_session(
         }
     };
 
-    udp_session_with_tunnel(socket, src, target, tunnel, sessions, data_rx, udp_idle, cancel, metrics)
+    udp_session_with_tunnel(socket, src, target, tunnel, sessions, data_rx, udp_idle, cancel, metrics, open_ack_timeout)
         .await
 }
 
 /// Core UDP session logic with a [`Tunnel`] directly (no TunnelClient).
 ///
 /// Used by both the normal forwarder and the reverse listener.
+///
+/// `open_ack_timeout` bounds the OPEN_ACK wait so a stalled peer dial cannot
+/// hang the local session indefinitely.
 pub async fn udp_session_with_tunnel(
     socket: Arc<UdpSocket>,
     src: SocketAddr,
@@ -155,6 +160,7 @@ pub async fn udp_session_with_tunnel(
     udp_idle: Duration,
     cancel: CancellationToken,
     metrics: Option<Arc<ForwarderMetrics>>,
+    open_ack_timeout: Duration,
 ) -> Result<()> {
     // Open stream
     let handle = tunnel
@@ -164,10 +170,22 @@ pub async fn udp_session_with_tunnel(
     let tx = handle.tx.clone();
     let mut rx = handle.rx;
 
-    // Wait for OPEN_ACK
-    match rx.recv().await {
-        Some(StreamIn::OpenAck(true)) => {}
-        _ => {
+    // Wait for OPEN_ACK (bounded by open_ack_timeout)
+    match tokio::time::timeout(open_ack_timeout, rx.recv()).await {
+        Ok(Some(StreamIn::OpenAck(true))) => {}
+        Ok(_) => {
+            tracing::warn!(stream_id, "UDP stream to {} closed before ack", target);
+            tunnel.remove_stream(stream_id);
+            sessions.lock().await.remove(&src);
+            return Ok(());
+        }
+        Err(_) => {
+            tracing::warn!(
+                stream_id,
+                "UDP stream to {} open_ack timeout after {:?}, closing",
+                target,
+                open_ack_timeout
+            );
             tunnel.remove_stream(stream_id);
             sessions.lock().await.remove(&src);
             return Ok(());
