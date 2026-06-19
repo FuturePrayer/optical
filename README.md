@@ -256,6 +256,49 @@ curl http://127.0.0.1:9100/metrics
 | `optical status --admin <addr>` | 查看隧道和转发器实时状态 |
 | `optical ping --admin <addr> --tunnel <addr> -c <n>` | 测量隧道延迟(RTT) |
 | `optical bench --admin <addr> --tunnel <addr> -d <s> -s <bytes>` | 测量隧道吞吐 |
+| `optical update [--check] [--force] [--restart]` | 检查并更新到最新版本(从 GitHub Releases 下载) |
+
+## 自我更新
+
+`optical update` 从 GitHub Releases 检查最新版本,下载对应平台的裸二进制并原地替换当前可执行文件。无需手动下载、解压或停止服务。
+
+### 基本用法
+
+```bash
+# 检查是否有新版本(不下载)
+optical update --check
+
+# 更新到最新版本
+optical update
+
+# 强制重新安装当前版本
+optical update --force
+
+# 更新后自动重启系统服务
+optical update --restart
+```
+
+### 工作原理
+
+1. 查询 GitHub Releases API 获取最新版本号,与编译期嵌入的当前版本做语义化版本比较
+2. 从 Release assets 中匹配当前平台的二进制文件,流式下载到临时文件
+3. 原地替换:
+   - **Windows**:将运行中的 exe 重命名为 `.bak`,写入新 exe(`.bak` 在下次更新时自动清理)
+   - **Linux**:写入同目录临时文件后原子 `rename`,并复制原文件权限位
+4. `--restart` 标志会调用 `service::restart()` 重启已注册的系统服务
+
+### 发布约定
+
+GitHub Release 的 asset 按以下命名约定上传(由 [GitHub Actions 工作流](.github/workflows/release.yml) 自动完成):
+
+| 平台 | Asset 文件名 |
+|------|-------------|
+| Windows x86_64 | `optical-x86_64-pc-windows-msvc.exe` |
+| Linux x86_64 | `optical-x86_64-unknown-linux-gnu` |
+
+推送 `v*` 格式的 tag(如 `v0.2.0`)即可触发自动构建发布。Release 使用 `release-perf` 编译 profile(fat LTO + codegen-units=1),对密码学运算密集场景有性能优化。
+
+> **注意**:`optical update` 仅替换二进制文件。如以系统服务方式运行,需配合 `--restart` 或手动执行 `optical restart` 使新版本生效。
 
 ## 本地开发
 
@@ -274,12 +317,17 @@ cargo build
 # Release 构建
 cargo build --release
 
+# 极致优化构建(用于发布分发:fat LTO + codegen-units=1)
+cargo build --profile release-perf
+
 # 运行测试
 cargo test
 
 # 检查(不生成二进制)
 cargo check
 ```
+
+`release-perf` profile 继承自 `release`,额外启用跨 crate 全局优化(`lto = "fat"`)和单 codegen unit(`codegen-units = 1`),对密码学运算密集场景(ML-KEM/ML-DSA/ChaCha20-Poly1305)有性能收益,代价是编译时间显著增加。GitHub Actions 发布工作流默认使用此 profile。
 
 ### Windows 静态链接 CRT
 

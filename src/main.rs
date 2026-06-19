@@ -11,6 +11,7 @@ mod proto;
 mod service;
 mod transport;
 mod tunnel;
+mod updater;
 
 use std::path::PathBuf;
 
@@ -118,6 +119,18 @@ enum Commands {
         #[arg(short, long, default_value = "65535")]
         size: usize,
     },
+    /// Check for a newer version and update the optical binary in place
+    Update {
+        /// Only check whether an update is available; do not download.
+        #[arg(long)]
+        check: bool,
+        /// Force update even when the latest version is not newer.
+        #[arg(long)]
+        force: bool,
+        /// Restart the system service after a successful update.
+        #[arg(long)]
+        restart: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -195,6 +208,13 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?;
             rt.block_on(cli_bench(&admin, &tunnel, duration, size))?;
+        }
+        Commands::Update {
+            check,
+            force,
+            restart,
+        } => {
+            updater::run_update(check, force, restart)?;
         }
     }
 
