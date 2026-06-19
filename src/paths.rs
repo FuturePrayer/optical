@@ -122,7 +122,7 @@ fn yaml_path(p: &Path) -> String {
 /// Render the config template with the given PSK, key paths, and log directory.
 ///
 /// `psk_hex` must be the full `"hex:<64 hex chars>"` string.
-/// `log_dir_path` is the directory for daily-rotating log files (typically a
+/// `log_dir_path` is the directory for rolling log files (typically a
 /// sibling of the keys directory, e.g. `<base>/logs`).
 /// A generation notice is prepended reminding the user to edit the file.
 pub fn render_config(

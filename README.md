@@ -90,7 +90,7 @@ optical init --force
 ├── keys/
 │   ├── node.key        # ML-DSA-65 私钥(32 字节 seed)
 │   └── node.pub        # ML-DSA-65 公钥(1952 字节)
-└── logs/               # 按日滚动的日志文件(init 自动配置 log_dir 指向此处)
+└── logs/               # 滚动日志文件(按日+按大小轮转,init 自动配置 log_dir 指向此处)
 ```
 
 #### 默认路径
@@ -116,9 +116,13 @@ psk: "hex:a1b2c3..."
 mldsa_private_key: "/etc/optical/keys/node.key"
 mldsa_public_key: "/etc/optical/keys/node.pub"
 
-# 日志目录(按日滚动,init 已自动填入)
+# 日志目录(按日+按大小滚动,init 已自动填入)
 # 设为 null 或省略则仅输出到 stdout
 log_dir: "/etc/optical/logs"
+# 单个日志文件最大大小(MB),超过则轮转;0=不限(仅按日轮转);默认 50
+log_max_size_mb: 50
+# 日志保留天数,超过则删除;0=不清理;默认 30
+log_retention_days: 30
 
 # Node2 角色:隧道服务端(接受入站隧道)
 # 不需要此角色则删除或注释掉
@@ -408,7 +412,7 @@ RUST_LOG=debug cargo run -- run --config config.yml
 $env:RUST_LOG="debug"; cargo run -- run --config config.yml
 ```
 
-配置文件中设置 `log_dir` 后,日志在输出到 stdout 的同时额外写入按日滚动的文件(如 `optical.log.2026-06-19`),便于服务部署时留存历史日志。`init` 默认将 `log_dir` 设为 `<base>/logs`。设为 `null` 或省略则仅输出到 stdout。
+配置文件中设置 `log_dir` 后,日志在输出到 stdout 的同时额外写入滚动文件。文件按**日期**(UTC 每日)和**大小**(`log_max_size_mb`,默认 50MB)双重条件轮转,命名格式 `optical.log.YYYY-MM-DD[.N]`。超过 `log_retention_days`(默认 30 天)的旧文件在启动时和每日轮转后自动清理。`init` 默认将 `log_dir` 设为 `<base>/logs`。设为 `null` 或省略则仅输出到 stdout。
 
 ## 安全说明
 

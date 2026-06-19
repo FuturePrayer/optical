@@ -16,11 +16,21 @@ psk: "hex:0000000000000000000000000000000000000000000000000000000000000000"
 mldsa_private_key: "./keys/node.key"
 mldsa_public_key: "./keys/node.pub"
 
-# Directory for daily-rotating log files. When set, logs are written to
-# rolling files in this directory (one file per day, e.g. optical.log.2026-06-19)
-# in addition to stdout. Set to null or omit to log to stdout only.
+# Directory for rolling log files. When set, logs are written to files in
+# this directory in addition to stdout. Files rotate daily and/or when they
+# reach log_max_size_mb. Set to null or omit to log to stdout only.
 # Default: "./logs" (sibling of the keys directory).
 log_dir: "./logs"
+
+# Maximum size of a single log file in MB. When a file reaches this size it
+# is rotated (a new file with an incremented suffix opens).
+# Default: 50. Set to 0 for unlimited (daily rotation only).
+log_max_size_mb: 50
+
+# Number of days to retain log files. Files older than this (by mtime) are
+# deleted on startup and after each daily rotation.
+# Default: 30. Set to 0 to disable retention (keep all files).
+log_retention_days: 30
 
 # ── Node2 role: tunnel server (accept incoming tunnels) ─────────────────────
 # Omit this field to disable the Node2 role.

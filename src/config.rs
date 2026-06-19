@@ -84,6 +84,17 @@ pub struct Config {
     /// stdout. When omitted, logs go to stdout only.
     #[serde(default)]
     pub log_dir: Option<PathBuf>,
+    /// Maximum size of a single log file in MB. When a file reaches this
+    /// size it is rotated (a new file with an incremented suffix is opened).
+    /// Default: 50. Only effective when `log_dir` is set. Set to 0 for
+    /// unlimited (daily rotation only, no size cap).
+    #[serde(default = "default_log_max_size_mb")]
+    pub log_max_size_mb: u64,
+    /// Number of days to retain log files. Files older than this are deleted
+    /// on startup and after each rotation. Default: 30. Only effective when
+    /// `log_dir` is set. Set to 0 to disable retention (keep all files).
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,6 +188,12 @@ fn default_socket_buffer_bytes() -> u64 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_log_max_size_mb() -> u64 {
+    50
+}
+fn default_log_retention_days() -> u64 {
+    30
 }
 
 impl Config {
