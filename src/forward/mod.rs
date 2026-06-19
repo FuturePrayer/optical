@@ -63,7 +63,7 @@ pub async fn run_forwarders<C: Connect>(
 
         // Register tunnel metrics (pre-register so Tunnel::new can find it)
         if let Some(reg) = metrics::try_get() {
-            reg.register_tunnel(&tunnel_addr);
+            reg.register_tunnel(&tunnel_addr, metrics::TunnelRole::Client);
         }
 
         let tunnel_client = TunnelClient::start(

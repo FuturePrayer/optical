@@ -6,7 +6,9 @@
 //!
 //! Key design:
 //! - `TunnelMetrics` are keyed by tunnel peer address (e.g. "peer:9000").
-//!   Pre-registered by `run_forwarders` before the `TunnelClient` starts.
+//!   Pre-registered by `run_forwarders` (Client/outbound role) before the
+//!   `TunnelClient` starts, and by the tunnel server (Server/inbound role)
+//!   after a successful handshake.
 //! - `ForwarderMetrics` are keyed by local listen address.
 //! - `HistoryBuffer` stores periodic snapshots for trend analysis.
 
@@ -26,9 +28,28 @@ use crate::config::Protocol;
 pub const STATE_DISCONNECTED: u8 = 0;
 pub const STATE_CONNECTED: u8 = 1;
 
+/// Tunnel role: Client (Node1, outbound dialer) or Server (Node2, inbound
+/// listener). Distinguishes tunnel directions in status output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelRole {
+    Client,
+    Server,
+}
+
+impl TunnelRole {
+    /// Display label: "outbound" (Client) or "inbound" (Server).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TunnelRole::Client => "outbound",
+            TunnelRole::Server => "inbound",
+        }
+    }
+}
+
 /// Per-tunnel metrics. Shared across reconnections (the registry entry
 /// persists; each new `Tunnel` grabs the same `Arc`).
 pub struct TunnelMetrics {
+    pub role: TunnelRole,
     pub state: AtomicU8,
     pub bytes_sent: AtomicU64,
     pub bytes_recv: AtomicU64,
@@ -40,8 +61,9 @@ pub struct TunnelMetrics {
 }
 
 impl TunnelMetrics {
-    fn new() -> Self {
+    fn new(role: TunnelRole) -> Self {
         Self {
+            role,
             state: AtomicU8::new(STATE_DISCONNECTED),
             bytes_sent: AtomicU64::new(0),
             bytes_recv: AtomicU64::new(0),
@@ -118,14 +140,32 @@ pub fn try_get() -> Option<&'static MetricsRegistry> {
 }
 
 impl MetricsRegistry {
-    /// Register a tunnel metrics entry. Called before `TunnelClient::start`.
-    pub fn register_tunnel(&self, addr: &str) -> std::sync::Arc<TunnelMetrics> {
-        let metrics = std::sync::Arc::new(TunnelMetrics::new());
+    /// Register a tunnel metrics entry. Called before `TunnelClient::start`
+    /// (Client role) or after a server-side handshake (Server role).
+    pub fn register_tunnel(
+        &self,
+        addr: &str,
+        role: TunnelRole,
+    ) -> std::sync::Arc<TunnelMetrics> {
+        let metrics = std::sync::Arc::new(TunnelMetrics::new(role));
         self.tunnels
             .write()
             .unwrap()
             .insert(addr.to_string(), metrics.clone());
         metrics
+    }
+
+    /// Remove a tunnel metrics entry. The `expected` Arc is compared by
+    /// pointer to avoid removing a newer entry that replaced the original
+    /// under the same key (e.g. a server-side peer reconnected before the
+    /// old monitor task ran).
+    pub fn unregister_tunnel(&self, addr: &str, expected: &std::sync::Arc<TunnelMetrics>) {
+        let mut tunnels = self.tunnels.write().unwrap();
+        if let Some(existing) = tunnels.get(addr) {
+            if std::sync::Arc::ptr_eq(existing, expected) {
+                tunnels.remove(addr);
+            }
+        }
     }
 
     /// Look up tunnel metrics by address.
@@ -162,6 +202,7 @@ impl MetricsRegistry {
             .iter()
             .map(|(addr, m)| TunnelSnapshot {
                 addr: addr.clone(),
+                role: m.role.as_str().to_string(),
                 state: if m.is_connected() {
                     "connected"
                 } else {
@@ -213,6 +254,7 @@ pub struct Snapshot {
 #[derive(Debug, Serialize)]
 pub struct TunnelSnapshot {
     pub addr: String,
+    pub role: String,
     pub state: String,
     pub rtt_us: u64,
     pub bytes_sent: u64,

@@ -273,6 +273,7 @@ struct StatusResponse {
 #[derive(Deserialize)]
 struct TunnelStatusJson {
     addr: String,
+    role: String,
     state: String,
     rtt_us: u64,
     bytes_sent: u64,
@@ -376,7 +377,8 @@ async fn cli_status(admin: &str) -> anyhow::Result<()> {
                 "DISCONNECTED"
             };
             println!(
-                "  {:<30} {:<12} RTT: {:<8} up: {:<8} ↑{}  ↓{}  reconnects: {}",
+                "  {:<10} {:<30} {:<12} RTT: {:<8} up: {:<8} ↑{}  ↓{}  reconnects: {}",
+                t.role,
                 t.addr,
                 state,
                 format_rtt(t.rtt_us),

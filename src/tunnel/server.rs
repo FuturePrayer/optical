@@ -105,9 +105,26 @@ pub async fn run<L: Listen>(
                     match server_handshake(&mut stream, psk, dsa_keypair).await {
                         Ok(handshake) => {
                             let udp_idle_secs = config.udp_idle_secs;
+
+                            // Register server-side tunnel metrics keyed by the
+                            // peer's TCP address, so `optical status` shows
+                            // inbound tunnels. Unregistered when the tunnel
+                            // dies (see monitor task below).
+                            let peer_key = peer_addr.to_string();
+                            let metrics_arc = crate::metrics::try_get().map(|reg| {
+                                reg.register_tunnel(
+                                    &peer_key,
+                                    crate::metrics::TunnelRole::Server,
+                                )
+                            });
+
                             let (tunnel, open_rx, reverse_rx) =
-                                Tunnel::new(stream, handshake, config, None);
+                                Tunnel::new(stream, handshake, config, Some(&peer_key));
                             tracing::info!("tunnel established with {}", peer_addr);
+
+                            // Capture the tunnel's cancel token before moving
+                            // the handle into the OPEN handler.
+                            let tunnel_cancel = tunnel.cancel_token();
 
                             // Process incoming OPEN requests (dial targets)
                             let tunnel_for_reverse = tunnel.clone();
@@ -127,6 +144,19 @@ pub async fn run<L: Listen>(
                                 udp_idle_secs,
                                 cancel_for_reverse,
                             ));
+
+                            // Unregister metrics when the tunnel dies to avoid
+                            // stale entries accumulating. The Arc pointer
+                            // check in unregister_tunnel guards against a peer
+                            // reconnecting under the same key before this runs.
+                            if let Some(metrics_arc) = metrics_arc {
+                                tokio::spawn(async move {
+                                    tunnel_cancel.cancelled().await;
+                                    if let Some(reg) = crate::metrics::try_get() {
+                                        reg.unregister_tunnel(&peer_key, &metrics_arc);
+                                    }
+                                });
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("handshake failed from {}: {e}", peer_addr);

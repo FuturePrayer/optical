@@ -128,13 +128,17 @@ src/
 - **全局 `MetricsRegistry`**(`OnceLock`):避免在所有函数签名中传递 `Arc`
   - `metrics::init()` 在 `app.rs` 启动时调用一次
   - `metrics::try_get()` 在任意代码路径获取注册表
+- **隧道指标注册**:两侧角色都会注册 `TunnelMetrics`,通过 `TunnelRole` 区分方向
+  - `TunnelRole::Client`("outbound"):由 `run_forwarders`(Node1)预注册,key=配置的 `tunnel_addr`,跨重连复用同一 entry
+  - `TunnelRole::Server`("inbound"):由 `tunnel::server::run`(Node2)握手成功后注册,key=TCP 连接对端 `peer_addr`,隧道断开时经 `unregister_tunnel` 注销(带 `Arc` 指针比较防重连误删)
+  - `Tunnel::new` 接收 `metrics_key: Option<&str>`,从全局注册表查找对应 `Arc<TunnelMetrics>`;服务端隧道传 `Some(&peer_key)`,未注册时不采集
 - **插桩点**:writer/reader task 字节计数、heartbeat RTT、forwarder accept/连接数
 - **管理 API**(`admin/`):本地 TCP HTTP-JSON 服务,手写 HTTP 解析(无框架依赖)
-  - `GET /status` — 实时快照
+  - `GET /status` — 实时快照(含所有已注册隧道,role 字段区分方向)
   - `GET /metrics` — 历史时间序列
-  - `POST /ping` — 通过 `Tunnel::ping_once()` 测延迟
-  - `POST /bench` — 通过 `Tunnel::bench()` 测吞吐(ECHO 回环)
-- **TunnelRegistry**:共享 `TunnelClient` 引用,供 admin API 在独立进程中调用
+  - `POST /ping` — 通过 `Tunnel::ping_once()` 测延迟(仅客户端侧隧道,依赖 `TunnelRegistry`)
+  - `POST /bench` — 通过 `Tunnel::bench()` 测吞吐(ECHO 回环)(仅客户端侧隧道)
+- **TunnelRegistry**:共享 `TunnelClient` 引用,供 admin API 的 `/ping` `/bench` 调用。仅 forward 模块(Node1)填充,纯节点2 不支持 ping/bench
 
 ## 开发规范
 
@@ -165,6 +169,8 @@ src/
 4. 如需客户端侧响应,在 `TunnelInner` 添加等待通道(参考 `ping_waiter`/`echo_reply_tx`/`register_ack_waiter`)
 5. 如需服务端侧处理,在 `Tunnel::new` 创建 mpsc channel 并由 `reader_task` 投递(参考 `open_tx`/`reverse_tx`),消费端在 `tunnel/server.rs` 中 spawn
 
+> **兼容性注意**:自 v0.1.0 起存在存量用户。新增帧类型时,旧版本节点的 `parse_header` 遇到未知帧类型会返回 `Err` 并断开隧道。引入新帧类型前,应先发布能静默跳过未知帧类型的容错版本(修改 `parse_header` 行为),或通过握手版本协商规避。详见上文"协议兼容性"章节。
+
 ### 新增 CLI 子命令
 
 1. `main.rs` 的 `Commands` enum 添加变体(clap derive)
@@ -183,7 +189,23 @@ src/
 
 ### 协议兼容性
 
-项目处于开发阶段,无存量用户,**不考虑协议前向/后向兼容**。修改帧协议时两端同时升级即可。`parse_header` 中未知帧类型会返回 `Err`(非静默跳过)。
+自 v0.1.0 发布起,项目已有存量用户,**协议变更必须考虑前向/后向兼容**。修改帧协议或握手协议时,需确保新旧版本节点能够互通,或至少做到优雅降级而非断连。
+
+**帧协议兼容性约束:**
+
+- 帧类型字段为 1 字节,当前已用 `0x01`-`0x0A`(`Open` 至 `RegisterReverseAck`)
+- `parse_header` 对未知帧类型返回 `Err`(**非静默跳过**)— 这是一个关键兼容性风险点:新版本引入新帧类型后,旧版本节点遇到该帧会报错并断开整条隧道。引入新帧类型前,应先发布一个能"静默跳过未知帧类型"的容错版本,等待足够比例的用户升级后再发布实际使用新帧类型的版本;或通过握手阶段的版本协商机制规避
+- 帧头结构(15B: `[4B stream_id][8B counter][1B frame_type][2B payload_len]`)变更属破坏性改动,会阻断新旧端互通
+
+**握手协议兼容性约束:**
+
+- ClientHello / ServerHello / Finished 报文结构变更需保证新旧端握手成功。建议在协议演进时引入版本字段或能力协商,使新端能检测对端版本并回退到兼容行为
+- 密钥派生、AEAD 算法等密码学参数变更属破坏性改动,须通过握手协商完成平滑过渡
+
+**版本分发:**
+
+- 版本号遵循 semver,通过 GitHub Releases 分发,用户可用 `optical update` 拉取新版本
+- 破坏性协议变更应在主版本号升级时进行,并在 Release Notes 中明确标注兼容性影响
 
 ### Metrics 传递方式
 
@@ -192,7 +214,7 @@ src/
 - 每个进程只有一个注册表
 - `try_get()` 返回 `Option`,未初始化时安全降级(不采集)
 
-`Tunnel::new()` 接收 `metrics_key: Option<&str>` 参数,在注册表中查找对应的 `TunnelMetrics`。服务端隧道传 `None`(服务端暂不采集单隧道指标),客户端隧道传 `Some(&addr)`。返回三元组 `(Tunnel, Receiver<IncomingOpen>, Receiver<IncomingReverse>)`——客户端消费 open_rx 用于反向隧道拨号,服务端同时消费 open_rx 和 reverse_rx。
+`Tunnel::new()` 接收 `metrics_key: Option<&str>` 参数,在注册表中查找对应的 `TunnelMetrics`。客户端隧道传 `Some(&addr)`(key=配置的对端监听地址,跨重连复用同一 entry),服务端隧道传 `Some(&peer_key)`(key=TCP 连接对端 `peer_addr`,握手成功时由 `register_tunnel(.., TunnelRole::Server)` 预注册)。服务端隧道断开时通过 `unregister_tunnel`(带 `Arc` 指针比较)注销条目,避免堆积。返回三元组 `(Tunnel, Receiver<IncomingOpen>, Receiver<IncomingReverse>)`——客户端消费 open_rx 用于反向隧道拨号,服务端同时消费 open_rx 和 reverse_rx。
 
 ### mark_disconnected 原子性
 
