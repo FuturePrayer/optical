@@ -56,6 +56,10 @@ pub struct TunnelMetrics {
     /// Most recent RTT in microseconds (0 = unknown).
     pub rtt_us: AtomicU64,
     pub reconnect_count: AtomicU32,
+    /// Inbound Data frames dropped because the target stream's channel was
+    /// full (slow consumer / head-of-line-blocking mitigation). Non-zero
+    /// indicates a consumer that can't keep up with the arrival rate.
+    pub frames_dropped: AtomicU64,
     pub last_connected: Mutex<Option<Instant>>,
     pub last_disconnected: Mutex<Option<Instant>>,
 }
@@ -69,6 +73,7 @@ impl TunnelMetrics {
             bytes_recv: AtomicU64::new(0),
             rtt_us: AtomicU64::new(0),
             reconnect_count: AtomicU32::new(0),
+            frames_dropped: AtomicU64::new(0),
             last_connected: Mutex::new(None),
             last_disconnected: Mutex::new(None),
         }
@@ -213,6 +218,7 @@ impl MetricsRegistry {
                 bytes_sent: m.bytes_sent.load(Ordering::Relaxed),
                 bytes_recv: m.bytes_recv.load(Ordering::Relaxed),
                 reconnect_count: m.reconnect_count.load(Ordering::Relaxed),
+                frames_dropped: m.frames_dropped.load(Ordering::Relaxed),
                 uptime_secs: m.uptime_secs(),
             })
             .collect();
@@ -260,6 +266,7 @@ pub struct TunnelSnapshot {
     pub bytes_sent: u64,
     pub bytes_recv: u64,
     pub reconnect_count: u32,
+    pub frames_dropped: u64,
     pub uptime_secs: u64,
 }
 

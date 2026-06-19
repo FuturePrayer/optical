@@ -79,9 +79,11 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         let allow_reverse = config.allow_reverse;
         let rev_registry = reverse_registry.clone();
         let tunnel_transport = config.tunnel_transport;
+        let socket_buf = config.tunnel.socket_buffer_bytes;
+        let kcp_config = crate::transport::kcp::fastest_kcp_config();
         handles.push(tokio::spawn(async move {
             if let Err(e) = crate::tunnel::server::run(
-                crate::transport::AnyTransport::for_server(tunnel_transport),
+                crate::transport::AnyTransport::for_server(tunnel_transport, socket_buf, kcp_config),
                 listen_addr,
                 psk,
                 dsa_keypair,
@@ -111,9 +113,11 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         let cancel = cancel.clone();
         let registry = tunnel_registry.clone();
         let fwd_error = forwarder_error.clone();
+        let socket_buf = config.tunnel.socket_buffer_bytes;
+        let kcp_config = crate::transport::kcp::fastest_kcp_config();
         handles.push(tokio::spawn(async move {
             let result = crate::forward::run_forwarders(
-                crate::transport::AnyTransport::for_client(),
+                crate::transport::AnyTransport::for_client(socket_buf, kcp_config),
                 forwarders,
                 psk,
                 dsa_keypair,

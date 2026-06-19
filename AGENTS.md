@@ -18,6 +18,22 @@
 用户 → Node1 本地端口 → [加密多路复用隧道] → Node2 → 拨号到目标
 ```
 
+### 加密设计原则:不引入常规 TLS
+
+**项目明确不计划引入常规 TLS**(如 rustls/openssl/TCP+TLS)。安全通道完全由自研的 PQ 握手 + AEAD 帧加密提供,这是核心设计决策,**新增功能或重构时不得擅自添加 TLS 传输层**(如 `tls://` scheme、`wss://`、TLS 终止等),除非有明确的安全论证并经人工评审。
+
+**加密为何不依赖 TLS:** 加密层建立在"有序可靠字节流"抽象之上,而三种内置传输(TCP / KCP / WS)都恰好提供这一抽象:
+
+- **TCP**:原生有序可靠字节流
+- **KCP**:`KcpStream` 在 UDP 之上实现重传+排序,对上层暴露等价于 TCP 的字节流语义(已实现 `AsyncRead/AsyncWrite`)
+- **WebSocket**:`WsDuplex` 适配层把 `WebSocketStream` 的消息流(`Stream`/`Sink`)转为有序字节流(WS 跑在 TCP 之上,天然可靠有序)
+
+因此握手(`client_handshake` / `server_handshake`)和隧道(`Tunnel::new`)完全泛型化于 `AsyncRead + AsyncWrite + Unpin`,**不引用任何具体传输类型**,三种传输下加密机制完全等价生效、强度一致。
+
+**WS 的特殊说明**:WS 的 `ws://` 明文回源(配合 CDN Flexible SSL)依赖隧道自身的 ChaCha20-Poly1305 保护——CDN 节点虽可见流量特征(帧大小/时序),但看到的载荷始终是密文。这是有意为之的设计,**不需要也无法用 TLS 替代**(TLS 会终止于 CDN,与 Flexible SSL 回源模型冲突)。
+
+**例外**:`admin/` 管理 API 若需远程访问,仍可考虑加 TLS + token(当前未实现,见"admin API 安全"章节)——admin API 不承载隧道流量,与上述隧道加密设计无关。
+
 ## 代码结构
 
 ```
@@ -86,8 +102,8 @@ src/
 
 `Tunnel` 结构封装一条已握手的加密连接,运行三个后台 task:
 
-- **writer_task**:从 mpsc channel 取帧 → 加密 → 写入传输层,每帧累加 `bytes_sent`
-- **reader_task**:从传输层读取 → 解密 → 按 frame_type 路由,每帧累加 `bytes_recv`
+- **writer_task**:从 mpsc channel 取帧 → 加密 → 写入传输层,每帧累加 `bytes_sent`。使用 micro-batch:首帧经 `pack_frame()` 把 header+ciphertext 拼进单个 `Vec`(单次 `write_all`),然后用 `try_recv` 非阻塞抽干 channel 最多 64 帧攒进同一缓冲,单次 `flush`。对 WS 传输尤其重要(避免 header/ciphertext 分两条 WS Binary 消息)
+- **reader_task**:从传输层读取 → 解密 → 按 frame_type 路由,每帧累加 `bytes_recv`。Data 帧用 `try_send` 非阻塞投递给流处理器,满则丢弃并累加 `frames_dropped` 指标(消除 head-of-line blocking)。读缓冲用 task-local `Vec` 复用(避免每帧堆分配)。解密失败即断连(TLS 原则)
 - **heartbeat_task**:周期发 PING,检测 PONG 超时,记录 PING 发送时间用于 RTT 计算
 
 `TunnelInner` 的关键字段:
@@ -102,8 +118,8 @@ src/
 
 当前内置三种传输,均通过 `AnyTransport` 统一调度(`transport/mod.rs`):
 
-- **TCP**(`tcp.rs`):默认,向后兼容存量配置
-- **KCP**(`kcp.rs`):基于 tokio-kcp 的可靠低延迟 UDP,延迟比 TCP 低 30-40%。`KcpStream` 已实现 `AsyncRead/AsyncWrite`,无需适配层
+- **TCP**(`tcp.rs`):默认,向后兼容存量配置。`tune_socket()` 在连接建立后设 `TCP_NODELAY` + `SO_RCVBUF`/`SO_SNDBUF`(由 `socket_buffer_bytes` 配置,默认 4MB)+ `SO_KEEPALIVE`(30s idle)。隧道是单连接多路复用,调大 socket buffer 对高 BDP 跨地域链路至关重要
+- **KCP**(`kcp.rs`):基于 tokio-kcp 的可靠低延迟 UDP,使用 `fastest_kcp_config()`(nodelay=true, interval=10ms, resend=2, nc=true, flush_write/flush_acks_input=true)预设,设计为比 TCP 显著更低延迟。`KcpStream` 已实现 `AsyncRead/AsyncWrite`,无需适配层
 - **WebSocket**(`ws.rs`):基于 tokio-tungstenite,穿越 HTTP 代理/防火墙,可接入 CDN(Flexible SSL:CDN 终止 TLS,明文 `ws://` 回源)。`WsDuplex` 适配层把 `WebSocketStream` 的 `Stream`/`Sink` 适配为 `AsyncRead`/`AsyncWrite`(读缓冲用 `VecDeque<Bytes>` 零拷贝优化);服务端 `WsTransportListener::accept` 用 `TcpStream::peek` 预判 WS 升级请求,非 WS 的 HTTP 请求返回 200 伪装页面(抗探测 + CDN HTTP 健康检查)。所有连接强制 `TCP_NODELAY`(避免 Nagle 给小帧加 40ms 延迟)
 
 客户端通过 `tunnel` 地址 URL scheme(`tcp://`/`kcp://`/`ws://`,无 scheme 默认 TCP)选择;服务端通过 `Config.tunnel_transport` 字段(`TransportKind` enum,serde 默认 Tcp)选择。两端协议必须匹配,不匹配时连接失败(预期行为)。Transport 是隧道之下的承载层,不触碰帧协议和 PQ 握手协议,故新增传输不受协议兼容性红线约束。
@@ -194,8 +210,8 @@ src/
 2. 在 `transport/mod.rs` 的 `AnyTransport` 分发中注册:
    - 客户端:在 `parse_transport_addr` 加 URL scheme 识别,在 `Connect::connect` 的 match 加 arm
    - 服务端:在 `config.rs` 的 `TransportKind` enum 加变体,在 `Listen::listen` 的 match 加 arm
-3. 隧道和握手代码无需修改(已泛型化);`app.rs` 用 `AnyTransport::for_server/for_client`,无需改动
-4. 如传输底层为 TCP(如 WS),务必在连接建立后 `set_nodelay(true)`,否则 Nagle 给小帧(Ping/握手)引入最多 40ms 延迟,致命
+3. 隧道和握手代码无需修改(已泛型化);`app.rs` 用 `AnyTransport::for_server/for_client`(传入 `socket_buffer_bytes` 和 `kcp_config`),无需改动
+4. 如传输底层为 TCP(如 WS),务必在连接建立后调用 `tune_socket()`(设 `TCP_NODELAY` + `SO_RCVBUF`/`SO_SNDBUF` + `SO_KEEPALIVE`),否则 Nagle 给小帧(Ping/握手)引入最多 40ms 延迟,致命;默认 socket buffer 在高 BDP 链路上会瓶颈吞吐
 
 ## 注意事项
 

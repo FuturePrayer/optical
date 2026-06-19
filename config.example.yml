@@ -114,6 +114,7 @@ tunnel:
   udp_idle_secs: 60             # close UDP stream after N seconds of inactivity
   dial_timeout_secs: 10         # timeout (seconds) for dialing a target after an OPEN
   open_ack_timeout_secs: 15     # timeout (seconds) for waiting on an OPEN_ACK from the peer
+  socket_buffer_bytes: 4194304  # TCP SO_RCVBUF/SO_SNDBUF for the tunnel connection (bytes); 0 = OS default (4 MiB recommended for high-BDP links)
 
 # ── Admin API (observability) ───────────────────────────────────────────────
 # Local HTTP endpoint for `optical status`, `optical ping`, `optical bench`.

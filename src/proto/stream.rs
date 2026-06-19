@@ -3,13 +3,13 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 
 use crate::metrics::ForwarderMetrics;
-use crate::proto::frame::FrameType;
+use crate::proto::frame::{FrameType, MAX_PAYLOAD};
 
 /// A frame to be sent over the tunnel (plaintext, before encryption).
 #[derive(Debug)]
@@ -106,18 +106,30 @@ pub async fn copy_tcp_bidirectional(
         let metrics = metrics.clone();
         let mut reader = reader;
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 16384];
+            // Read buffer sized to ~MAX_PAYLOAD so a full-size read becomes a
+            // single tunnel Data frame (no splitting into 16KB chunks). The
+            // buffer is reused across reads; BytesMut::split().freeze() hands
+            // off each chunk to the tunnel with a refcount-only slice (no copy).
+            let mut buf = BytesMut::with_capacity(MAX_PAYLOAD);
             loop {
+                // Ensure MAX_PAYLOAD writable bytes for the next read (split()
+                // in the previous iteration left buf empty but with capacity).
+                buf.clear();
+                buf.resize(MAX_PAYLOAD, 0);
                 match reader.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
                         if let Some(ref m) = metrics {
                             m.bytes_sent.fetch_add(n as u64, Ordering::Relaxed);
                         }
+                        // Truncate to the bytes actually read and split off a
+                        // cheap refcount Bytes (no copy).
+                        buf.truncate(n);
+                        let data = buf.split().freeze();
                         let frame = OutboundFrame {
                             stream_id,
                             frame_type: FrameType::Data,
-                            payload: Bytes::copy_from_slice(&buf[..n]),
+                            payload: data,
                         };
                         if tx.send(frame).await.is_err() {
                             break;

@@ -36,15 +36,30 @@ use crate::error::Result;
 
 use super::{BoxDuplex, Connect, Listen, Listener};
 
-/// WebSocket transport — zero-sized; connection parameters come from the
-/// `ws://` URL (client) or the bound `SocketAddr` (server).
-#[derive(Clone, Copy, Default)]
-pub struct WsTransport;
+/// WebSocket transport — carries the optional socket-buffer size for the
+/// underlying TCP connection. Connection parameters come from the `ws://`
+/// URL (client) or the bound `SocketAddr` (server).
+#[derive(Clone, Copy)]
+pub struct WsTransport {
+    socket_buffer_bytes: u64,
+}
+
+impl Default for WsTransport {
+    fn default() -> Self {
+        Self { socket_buffer_bytes: 0 }
+    }
+}
 
 impl WsTransport {
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Create with a custom TCP socket buffer size applied to the underlying
+    /// TCP connection (before the WS upgrade). Pass 0 to keep OS defaults.
+    pub fn with_socket_buffer(socket_buffer_bytes: u64) -> Self {
+        Self { socket_buffer_bytes }
     }
 }
 
@@ -66,6 +81,7 @@ fn parse_ws_authority(url: &str) -> Option<&str> {
 impl Connect for WsTransport {
     fn connect(&self, addr: &str) -> impl Future<Output = Result<BoxDuplex>> + Send {
         let addr = addr.to_owned();
+        let buf_bytes = self.socket_buffer_bytes;
         async move {
             let host_port = parse_ws_authority(&addr).ok_or_else(|| {
                 io::Error::new(
@@ -75,9 +91,10 @@ impl Connect for WsTransport {
             })?;
             // Connect the raw TCP stream first so we can force TCP_NODELAY —
             // Nagle would add up to 40ms to small frames (PING/handshake),
-            // which is fatal for the tunnel heartbeat detector.
+            // which is fatal for the tunnel heartbeat detector. Also apply
+            // socket-buffer tuning for high-BDP links.
             let tcp = TcpStream::connect(host_port).await?;
-            tcp.set_nodelay(true).ok();
+            super::tcp::tune_socket(&tcp, buf_bytes);
             // client_async performs the WS handshake over the already-connected
             // (and nodelay-configured) TCP stream, returning a
             // WebSocketStream<TcpStream> (no TLS wrapper).
@@ -91,26 +108,27 @@ impl Connect for WsTransport {
 
 impl Listen for WsTransport {
     fn listen(&self, addr: SocketAddr) -> impl Future<Output = Result<Box<dyn Listener>>> + Send {
+        let buf_bytes = self.socket_buffer_bytes;
         async move {
             let listener = TcpListener::bind(addr).await?;
-            Ok(Box::new(WsTransportListener(listener)) as Box<dyn Listener>)
+            Ok(Box::new(WsTransportListener(listener, buf_bytes)) as Box<dyn Listener>)
         }
     }
 }
 
 /// Listener backed by a `TcpListener` that upgrades qualifying connections to
 /// WebSocket and serves a camouflage page to plain HTTP clients.
-pub struct WsTransportListener(TcpListener);
+pub struct WsTransportListener(TcpListener, u64);
 
 impl Listener for WsTransportListener {
     fn accept(&mut self) -> Pin<Box<dyn Future<Output = Result<(BoxDuplex, SocketAddr)>> + Send + '_>> {
+        let buf_bytes = self.1;
         Box::pin(async move {
             loop {
                 let (mut stream, addr) = self.0.accept().await?;
-                // Force TCP_NODELAY on every inbound connection (both the WS
-                // upgrade path and the camouflage path) for the same reason as
-                // the client side.
-                stream.set_nodelay(true).ok();
+                // Tune the inbound TCP connection (NODELAY + buffer sizes +
+                // keepalive) for the same reasons as the client side.
+                super::tcp::tune_socket(&stream, buf_bytes);
 
                 // Peek (without consuming) to classify the request. accept_async
                 // must re-read the full request line + headers, so we cannot

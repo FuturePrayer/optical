@@ -127,6 +127,13 @@ pub struct TunnelConfig {
     /// Default: 15.
     #[serde(default = "default_open_ack_timeout")]
     pub open_ack_timeout_secs: u64,
+    /// TCP socket buffer size in bytes applied to the tunnel connection
+    /// (both SO_RCVBUF and SO_SNDBUF). The tunnel multiplexes all streams
+    /// over a single TCP connection, so the default OS buffer (often
+    /// 128KB–1MB) can bottleneck throughput on high-BDP cross-region links.
+    /// Default: 4194304 (4 MiB). Set to 0 to leave the OS default unchanged.
+    #[serde(default = "default_socket_buffer_bytes")]
+    pub socket_buffer_bytes: u64,
 }
 
 impl Default for TunnelConfig {
@@ -139,6 +146,7 @@ impl Default for TunnelConfig {
             udp_idle_secs: 60,
             dial_timeout_secs: 10,
             open_ack_timeout_secs: 15,
+            socket_buffer_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -163,6 +171,9 @@ fn default_dial_timeout() -> u64 {
 }
 fn default_open_ack_timeout() -> u64 {
     15
+}
+fn default_socket_buffer_bytes() -> u64 {
+    4 * 1024 * 1024
 }
 fn default_true() -> bool {
     true

@@ -52,6 +52,10 @@ zeroize = { version = "1", features = ["derive"] }
 tokio_kcp = "0.9"
 tokio-tungstenite = "0.29"
 
+# Socket option tuning (SO_RCVBUF/SO_SNDBUF/SO_KEEPALIVE) for the tunnel's
+# single multiplexed TCP connection — critical for high-BDP cross-region links.
+socket2 = "0.5"
+
 # Platform-specific: Windows Service Control Manager integration
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

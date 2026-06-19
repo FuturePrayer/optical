@@ -38,7 +38,7 @@ Node1 (Forwarder)                    Node2 (Tunnel Server)
 | 协议 | Node2 配置 | Node1 `tunnel` 地址 | 适用场景 |
 |------|------------|---------------------|----------|
 | TCP | `tunnel_transport: tcp`(默认) | `host:port` 或 `tcp://host:port` | 通用,向后兼容存量配置 |
-| KCP | `tunnel_transport: kcp` | `kcp://host:port` | 延迟敏感:基于 UDP 的可靠传输,比 TCP 低 30-40% 延迟,代价是更高带宽开销 |
+| KCP | `tunnel_transport: kcp` | `kcp://host:port` | 延迟敏感:基于 UDP 的可靠传输,启用 nodelay+快速重传+关闭拥塞控制,设计为比 TCP 显著更低延迟,代价是更高带宽开销 |
 | WebSocket | `tunnel_transport: ws` | `ws://host:port[/path]` | 穿越 HTTP 代理/防火墙;可接入 CDN(Flexible SSL:CDN 终止 TLS,明文 `ws://` 回源) |
 
 WebSocket 服务端对非 WebSocket 的普通 HTTP 请求返回 `200 OK` 伪装页面,使端口对外表现为普通网站,支持 CDN HTTP 健康检查(期望 200)与抗主动探测。optical 隧道自身已有 ChaCha20-Poly1305 AEAD 加密,WS 明文传输不泄露数据机密性,仅暴露流量特征。
@@ -171,6 +171,7 @@ tunnel:
   udp_idle_secs: 60
   dial_timeout_secs: 10        # 收到 OPEN 后拨号目标的超时(秒),默认 10
   open_ack_timeout_secs: 15    # 等待对端 OPEN_ACK 的超时(秒),默认 15
+  socket_buffer_bytes: 4194304 # 隧道 TCP 连接的 SO_RCVBUF/SO_SNDBUF(字节);0=系统默认;4MB 适合高 BDP 链路
 
 # 管理 API(可观测性,可选)
 admin_listen: "127.0.0.1:9100"

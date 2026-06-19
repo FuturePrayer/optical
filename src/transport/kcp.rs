@@ -2,8 +2,8 @@
 //!
 //! Wraps `tokio_kcp::KcpStream` / `KcpListener` behind the [`Connect`] and
 //! [`Listen`] traits. KCP is a reliable, low-latency protocol layered over UDP
-//! — it trades higher bandwidth (retransmissions) for ~30-40% lower latency
-//! than TCP, suiting latency-sensitive forwarding.
+//! — it trades higher bandwidth (retransmissions) for lower latency than TCP,
+//! suiting latency-sensitive forwarding.
 //!
 //! `KcpStream` already implements `AsyncRead + AsyncWrite + Unpin + Send`, so
 //! it satisfies [`Duplex`] via the blanket impl with no adapter needed — this
@@ -13,24 +13,55 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 
-use tokio_kcp::{KcpConfig, KcpListener, KcpStream};
+use tokio_kcp::{KcpConfig, KcpListener, KcpNoDelayConfig, KcpStream};
 
 use crate::error::Result;
 
 use super::{BoxDuplex, Connect, Listen, Listener};
 
+/// Build a low-latency "fastest" KCP configuration.
+///
+/// - `nodelay = true` (immediate ACK, no delay)
+/// - `interval = 10ms` (internal update tick)
+/// - `resend = 2` (fast resend on 2 ACKs)
+/// - `nc = true` (disable congestion control — trades bandwidth for latency)
+/// - `flush_write = true` / `flush_acks_input = true` (flush on write/input
+///   so frames aren't held for the next tick)
+///
+/// This is the configuration actually intended for latency-sensitive
+/// forwarding; the crate's `KcpConfig::default()` uses `normal()` (nodelay
+/// off, 40ms interval, congestion control on) which is NOT suitable here.
+pub fn fastest_kcp_config() -> KcpConfig {
+    KcpConfig {
+        mtu: 1400,
+        nodelay: KcpNoDelayConfig::fastest(),
+        wnd_size: (256, 256),
+        session_expire: std::time::Duration::from_secs(90),
+        flush_write: true,
+        flush_acks_input: true,
+        stream: false,
+        allow_recv_empty_packet: false,
+    }
+}
+
 /// KCP transport — carries the encrypted tunnel over reliable UDP (KCP).
 ///
-/// `KcpConfig` is `Copy`, so cloning is free. Uses `KcpConfig::default()`
-/// (low-latency nodelay preset suitable for real-time forwarding).
-#[derive(Clone, Copy, Default)]
+/// `KcpConfig` is `Copy`, so cloning is free.
+#[derive(Clone, Copy)]
 pub struct KcpTransport {
     config: KcpConfig,
 }
 
+impl Default for KcpTransport {
+    fn default() -> Self {
+        Self {
+            config: fastest_kcp_config(),
+        }
+    }
+}
+
 impl KcpTransport {
     /// Create with a custom KCP configuration.
-    #[allow(dead_code)]
     pub fn new(config: KcpConfig) -> Self {
         Self { config }
     }

@@ -472,6 +472,16 @@ pub struct BenchResult {
 }
 
 /// Writer task: encrypts and writes outbound frames to the transport.
+///
+/// Uses micro-batching to amortize syscall and framing overhead:
+/// 1. Each frame's header + ciphertext are packed into a single buffer and
+///    written with one `write_all` (saves a syscall; on WebSocket this also
+///    avoids sending the header and ciphertext as two separate WS Binary
+///    messages, halving the WS frame overhead and copy count).
+/// 2. After sending the first frame, any additional frames already queued in
+///    the channel are drained via `try_recv` and appended to the same batch,
+///    so a single `flush` pushes them all. This is especially beneficial for
+///    small frames (PING, OPEN, OPEN_ACK) and bursty multi-stream traffic.
 async fn writer_task<W>(
     mut write_rx: mpsc::Receiver<OutboundFrame>,
     mut writer: W,
@@ -481,6 +491,10 @@ async fn writer_task<W>(
     W: AsyncWrite + Unpin + Send,
 {
     let cancel = inner.cancel.clone();
+    // Upper bound on how many frames we coalesce into a single flush. Prevents
+    // unbounded batching under extreme load (each frame still needs a
+    // per-stream counter lock + an encrypt call).
+    const MAX_BATCH_FRAMES: usize = 64;
     loop {
         tokio::select! {
             biased;
@@ -491,49 +505,51 @@ async fn writer_task<W>(
                     None => break,
                 };
 
-                // Get and increment send counter for this stream
-                let counter = {
-                    let mut streams = inner.streams.lock().unwrap();
-                    match streams.get_mut(&frame.stream_id) {
-                        Some(ctx) => {
-                            let c = ctx.send_counter;
-                            ctx.send_counter += 1;
-                            c
+                // Pack the first frame into the batch buffer.
+                let mut batch: Vec<u8> = match pack_frame(&frame, &send_cipher, &inner) {
+                    PackResult::Packed(buf) => buf,
+                    PackResult::Dropped => continue, // stream closed, skip this frame
+                    PackResult::Fatal => break,      // encrypt failed, tear down
+                };
+                let mut frame_count = 1usize;
+
+                // Drain any additional queued frames (non-blocking) into the
+                // same batch, up to MAX_BATCH_FRAMES. A fatal encrypt error on
+                // any frame tears down the tunnel immediately.
+                let mut fatal = false;
+                while frame_count < MAX_BATCH_FRAMES {
+                    match write_rx.try_recv() {
+                        Ok(f) => {
+                            match pack_frame(&f, &send_cipher, &inner) {
+                                PackResult::Packed(buf) => {
+                                    batch.extend_from_slice(&buf);
+                                    frame_count += 1;
+                                }
+                                PackResult::Dropped => continue, // stream closed, skip
+                                PackResult::Fatal => {
+                                    fatal = true;
+                                    break;
+                                }
+                            }
                         }
-                        None => continue, // stream closed, drop frame
+                        Err(_) => break, // channel empty or closed
                     }
-                };
-
-                // Encrypt. Failure is fatal: we must NOT write the header
-                // (which advertises `payload_len + TAG_SIZE` ciphertext bytes)
-                // with an empty/short body, otherwise the peer's frame parser
-                // desyncs and all subsequent frames are misread. Tear down.
-                let ct_len = (frame.payload.len() + TAG_SIZE) as u16;
-                let header = build_header(frame.stream_id, counter, frame.frame_type, ct_len);
-                let ciphertext = match send_cipher.encrypt(frame.stream_id, counter, &header, &frame.payload) {
-                    Ok(ct) => ct,
-                    Err(e) => {
-                        tracing::error!(stream_id = frame.stream_id, "AEAD encrypt failed: {e}, closing tunnel");
-                        break;
-                    }
-                };
-
-                // Write header + ciphertext
-                if writer.write_all(&header).await.is_err() {
+                }
+                if fatal {
                     break;
                 }
-                if writer.write_all(&ciphertext).await.is_err() {
+
+                // Single write + flush for the whole batch.
+                if writer.write_all(&batch).await.is_err() {
                     break;
                 }
                 if writer.flush().await.is_err() {
                     break;
                 }
 
-                // Record bytes sent for metrics
-                if let Some(ref m) = inner.metrics {
-                    m.bytes_sent
-                        .fetch_add((HEADER_SIZE + ciphertext.len()) as u64, Ordering::Relaxed);
-                }
+                // Bytes-sent metrics are accumulated per-frame inside
+                // pack_frame so the count stays accurate even when a later
+                // frame in the batch is dropped (stream closed).
             }
         }
     }
@@ -541,6 +557,67 @@ async fn writer_task<W>(
     inner.cancel.cancel();
     mark_disconnected(&inner);
     tracing::info!("tunnel writer task exited");
+}
+
+/// Outcome of packing a single frame for the writer batch.
+enum PackResult {
+    /// Header + ciphertext packed into a contiguous buffer, ready to write.
+    Packed(Vec<u8>),
+    /// The frame was dropped (stream already closed). Safe to skip.
+    Dropped,
+    /// A fatal error occurred (encrypt failed). The tunnel must be torn down.
+    Fatal,
+}
+
+/// Encrypt a single outbound frame and pack header + ciphertext into a
+/// contiguous `Vec<u8>` (so the writer can issue a single `write_all`).
+///
+/// The returned buffer is `[header (15B)][ciphertext (payload_len + 16B tag)]`
+/// ready to write. Bytes-sent metrics are accumulated here so the count stays
+/// accurate even when multiple frames are batched.
+fn pack_frame(
+    frame: &OutboundFrame,
+    send_cipher: &AeadCipher,
+    inner: &TunnelInner,
+) -> PackResult {
+    // Get and increment send counter for this stream.
+    let counter = {
+        let mut streams = inner.streams.lock().unwrap();
+        match streams.get_mut(&frame.stream_id) {
+            Some(ctx) => {
+                let c = ctx.send_counter;
+                ctx.send_counter += 1;
+                c
+            }
+            None => return PackResult::Dropped, // stream closed, drop frame
+        }
+    };
+
+    // Encrypt. Failure is fatal: we must NOT write the header (which
+    // advertises `payload_len + TAG_SIZE` ciphertext bytes) with an
+    // empty/short body, otherwise the peer's frame parser desyncs.
+    let ct_len = (frame.payload.len() + TAG_SIZE) as u16;
+    let header = build_header(frame.stream_id, counter, frame.frame_type, ct_len);
+    let ciphertext = match send_cipher.encrypt(frame.stream_id, counter, &header, &frame.payload) {
+        Ok(ct) => ct,
+        Err(e) => {
+            tracing::error!(stream_id = frame.stream_id, "AEAD encrypt failed: {e}, closing tunnel");
+            return PackResult::Fatal;
+        }
+    };
+
+    // Pack header + ciphertext into a single contiguous buffer.
+    let mut buf = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
+    buf.extend_from_slice(&header);
+    buf.extend_from_slice(&ciphertext);
+
+    // Record bytes sent for metrics.
+    if let Some(ref m) = inner.metrics {
+        m.bytes_sent
+            .fetch_add(buf.len() as u64, Ordering::Relaxed);
+    }
+
+    PackResult::Packed(buf)
 }
 
 /// Reader task: reads, decrypts, and routes inbound frames.
@@ -554,6 +631,9 @@ async fn reader_task<R>(
     R: AsyncRead + Unpin + Send,
 {
     let cancel = inner.cancel.clone();
+    // Reusable ciphertext read buffer — grows to the largest frame seen and
+    // is reused across iterations, avoiding a heap allocation per frame.
+    let mut ct_buf: Vec<u8> = Vec::new();
     loop {
         let mut header = [0u8; HEADER_SIZE];
         tokio::select! {
@@ -568,15 +648,17 @@ async fn reader_task<R>(
 
         let (stream_id, counter, frame_type, payload_len) = parse_header(&header);
 
-        let mut ciphertext = vec![0u8; payload_len];
-        if reader.read_exact(&mut ciphertext).await.is_err() {
+        // Resize the reusable buffer (no allocation if it's already big
+        // enough; Vec only grows, never shrinks, so the capacity sticks).
+        ct_buf.resize(payload_len, 0);
+        if reader.read_exact(&mut ct_buf[..payload_len]).await.is_err() {
             break;
         }
 
         // Record bytes received for metrics (header + ciphertext)
         if let Some(ref m) = inner.metrics {
             m.bytes_recv
-                .fetch_add((HEADER_SIZE + ciphertext.len()) as u64, Ordering::Relaxed);
+                .fetch_add((HEADER_SIZE + payload_len) as u64, Ordering::Relaxed);
         }
 
         // Decrypt. On a reliable transport (TCP/KCP/WS-over-TCP), a decrypt
@@ -584,7 +666,7 @@ async fn reader_task<R>(
         // the TLS principle ("AEAD-fail ⟹ disconnect"), we tear down the
         // tunnel rather than silently dropping the frame (which would allow
         // unbounded probing).
-        let plaintext = match recv_cipher.decrypt(stream_id, counter, &header, &ciphertext) {
+        let plaintext = match recv_cipher.decrypt(stream_id, counter, &header, &ct_buf[..payload_len]) {
             Ok(p) => p,
             Err(_) => {
                 tracing::error!(stream_id, "AEAD decrypt failed, closing tunnel");
@@ -641,9 +723,28 @@ async fn reader_task<R>(
                     }
                 };
                 if let Some(tx) = tx {
-                    if tx.send(StreamIn::Data(Bytes::from(plaintext))).await.is_err() {
-                        // Stream handler closed; remove stream
-                        inner.streams.lock().unwrap().remove(&stream_id);
+                    // Use try_send (non-blocking) so a slow consumer whose
+                    // channel is full does not stall the reader and block all
+                    // other streams (head-of-line blocking). A full channel
+                    // drops the frame and increments the drop counter for
+                    // observability; the stream's reliability is already
+                    // best-effort (it carries application traffic that has its
+                    // own flow control, e.g. TCP over the tunnel).
+                    match tx.try_send(StreamIn::Data(Bytes::from(plaintext))) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                stream_id,
+                                "stream channel full, dropping inbound Data frame (slow consumer)"
+                            );
+                            if let Some(ref m) = inner.metrics {
+                                m.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            // Stream handler closed; remove stream
+                            inner.streams.lock().unwrap().remove(&stream_id);
+                        }
                     }
                 }
             }

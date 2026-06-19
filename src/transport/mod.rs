@@ -89,23 +89,28 @@ pub struct AnyTransport {
     listen_kind: TransportKind,
     /// KCP configuration (shared by both sides; `Copy`).
     kcp_config: KcpConfig,
+    /// TCP socket buffer size (SO_RCVBUF/SO_SNDBUF) applied to TCP and WS
+    /// (which runs over TCP) connections. 0 = keep OS defaults.
+    socket_buffer_bytes: u64,
 }
 
 impl AnyTransport {
     /// Build a server-side transport that listens with `kind`.
-    pub fn for_server(kind: TransportKind) -> Self {
+    pub fn for_server(kind: TransportKind, socket_buffer_bytes: u64, kcp_config: KcpConfig) -> Self {
         Self {
             listen_kind: kind,
-            kcp_config: KcpConfig::default(),
+            kcp_config,
+            socket_buffer_bytes,
         }
     }
 
     /// Build a client-side transport that dispatches per `tunnel` URL scheme.
-    pub fn for_client() -> Self {
+    pub fn for_client(socket_buffer_bytes: u64, kcp_config: KcpConfig) -> Self {
         // listen_kind is unused on the client; default to Tcp.
         Self {
             listen_kind: TransportKind::Tcp,
-            kcp_config: KcpConfig::default(),
+            kcp_config,
+            socket_buffer_bytes,
         }
     }
 }
@@ -135,12 +140,13 @@ fn parse_transport_addr(addr: &str) -> (TransportKind, &str) {
 impl Connect for AnyTransport {
     fn connect(&self, addr: &str) -> impl Future<Output = Result<BoxDuplex>> + Send {
         let kcp_config = self.kcp_config;
+        let buf_bytes = self.socket_buffer_bytes;
         async move {
             let (kind, target) = parse_transport_addr(addr);
             match kind {
-                TransportKind::Tcp => TcpTransport.connect(target).await,
+                TransportKind::Tcp => TcpTransport::with_socket_buffer(buf_bytes).connect(target).await,
                 TransportKind::Kcp => KcpTransport::new(kcp_config).connect(target).await,
-                TransportKind::Ws => WsTransport.connect(target).await,
+                TransportKind::Ws => WsTransport::with_socket_buffer(buf_bytes).connect(target).await,
             }
         }
     }
@@ -150,11 +156,12 @@ impl Listen for AnyTransport {
     fn listen(&self, addr: SocketAddr) -> impl Future<Output = Result<Box<dyn Listener>>> + Send {
         let kind = self.listen_kind;
         let kcp_config = self.kcp_config;
+        let buf_bytes = self.socket_buffer_bytes;
         async move {
             match kind {
-                TransportKind::Tcp => TcpTransport.listen(addr).await,
+                TransportKind::Tcp => TcpTransport::with_socket_buffer(buf_bytes).listen(addr).await,
                 TransportKind::Kcp => KcpTransport::new(kcp_config).listen(addr).await,
-                TransportKind::Ws => WsTransport.listen(addr).await,
+                TransportKind::Ws => WsTransport::with_socket_buffer(buf_bytes).listen(addr).await,
             }
         }
     }

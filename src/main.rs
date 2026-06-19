@@ -279,6 +279,7 @@ struct TunnelStatusJson {
     bytes_sent: u64,
     bytes_recv: u64,
     reconnect_count: u32,
+    frames_dropped: u64,
     uptime_secs: u64,
 }
 
@@ -376,8 +377,13 @@ async fn cli_status(admin: &str) -> anyhow::Result<()> {
             } else {
                 "DISCONNECTED"
             };
+            let drop_info = if t.frames_dropped > 0 {
+                format!("  drops: {}", t.frames_dropped)
+            } else {
+                String::new()
+            };
             println!(
-                "  {:<10} {:<30} {:<12} RTT: {:<8} up: {:<8} ↑{}  ↓{}  reconnects: {}",
+                "  {:<10} {:<30} {:<12} RTT: {:<8} up: {:<8} ↑{}  ↓{}  reconnects: {}{}",
                 t.role,
                 t.addr,
                 state,
@@ -385,7 +391,8 @@ async fn cli_status(admin: &str) -> anyhow::Result<()> {
                 format_uptime(t.uptime_secs),
                 format_bytes(t.bytes_sent),
                 format_bytes(t.bytes_recv),
-                t.reconnect_count
+                t.reconnect_count,
+                drop_info
             );
         }
     }
