@@ -13,6 +13,7 @@ use crate::crypto::handshake::{
     ServerHello,
 };
 use crate::crypto::pqdsa::DsaKeyPair;
+use crate::dial;
 use crate::error::{OpticalError, Result};
 use crate::transport::Connect;
 use crate::tunnel::Tunnel;
@@ -177,10 +178,16 @@ async fn maintain_connection<C: Connect>(
             tracing::info!("connecting to tunnel server at {}", addr);
             let mut stream = transport.connect(&addr).await?;
             let handshake = client_handshake(&mut stream, psk, dsa_keypair.clone()).await?;
-            let (tunnel, open_rx) = Tunnel::new(stream, handshake, config.clone(), Some(&addr));
+            let (tunnel, open_rx, reverse_rx) =
+                Tunnel::new(stream, handshake, config.clone(), Some(&addr));
 
-            // Client doesn't handle incoming OPEN, but we need to drain the channel
-            tokio::spawn(drain_open_rx(open_rx));
+            // Client side handles incoming OPENs (reverse-tunnel mode: the
+            // server may send OPENs back for connections it accepted on a
+            // reverse listener). Also drain the reverse_rx — the client
+            // never receives RegisterReverse frames.
+            let cancel = cancel.clone();
+            tokio::spawn(dial::handle_incoming_opens(tunnel.clone(), open_rx, cancel));
+            tokio::spawn(drain_reverse_rx(reverse_rx));
 
             Ok::<Tunnel, anyhow::Error>(tunnel)
         };
@@ -229,9 +236,9 @@ async fn maintain_connection<C: Connect>(
     tracing::info!("tunnel client to {} stopped", addr);
 }
 
-/// Drain incoming OPEN requests (client side ignores them).
-async fn drain_open_rx(mut open_rx: mpsc::Receiver<crate::proto::stream::IncomingOpen>) {
-    while open_rx.recv().await.is_some() {
-        // Client side does not handle incoming OPEN
+/// Drain incoming RegisterReverse requests (client side never receives them).
+async fn drain_reverse_rx(mut reverse_rx: mpsc::Receiver<crate::proto::stream::IncomingReverse>) {
+    while reverse_rx.recv().await.is_some() {
+        // Client side does not handle RegisterReverse
     }
 }

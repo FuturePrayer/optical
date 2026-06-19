@@ -2,6 +2,7 @@
 //! incoming OPEN requests by dialing targets.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
@@ -12,6 +13,7 @@ use crate::crypto::handshake::{
 };
 use crate::crypto::pqdsa::DsaKeyPair;
 use crate::error::Result;
+use crate::forward::reverse::ReverseRegistry;
 use crate::transport::Listen;
 use crate::tunnel::client::{read_msg, write_msg};
 use crate::tunnel::Tunnel;
@@ -55,16 +57,25 @@ where
     Ok(result)
 }
 
-/// Run the tunnel server: accept connections, handshake, and handle OPEN requests.
+/// Run the tunnel server: accept connections, handshake, and handle OPEN
+/// and RegisterReverse requests.
 ///
 /// The `transport` parameter controls the underlying network protocol
 /// (TCP, KCP, ...). It must implement [`Listen`].
+///
+/// `allow_reverse` and `reverse_registry` control reverse-tunnel support:
+/// when `allow_reverse` is false, all RegisterReverse requests are rejected.
+/// The `reverse_registry` tracks listen addresses across all tunnel
+/// connections to prevent conflicts.
+#[allow(clippy::too_many_arguments)]
 pub async fn run<L: Listen>(
     transport: L,
     listen_addr: SocketAddr,
     psk: [u8; 32],
     dsa_keypair: DsaKeyPair,
     config: TunnelConfig,
+    allow_reverse: bool,
+    reverse_registry: Arc<ReverseRegistry>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let mut listener = transport.listen(listen_addr).await?;
@@ -88,15 +99,34 @@ pub async fn run<L: Listen>(
                 let dsa_keypair = dsa_keypair.clone();
                 let config = config.clone();
                 let cancel = cancel.clone();
+                let registry = reverse_registry.clone();
 
                 tokio::spawn(async move {
                     match server_handshake(&mut stream, psk, dsa_keypair).await {
                         Ok(handshake) => {
-                            let (tunnel, open_rx) = Tunnel::new(stream, handshake, config, None);
+                            let udp_idle_secs = config.udp_idle_secs;
+                            let (tunnel, open_rx, reverse_rx) =
+                                Tunnel::new(stream, handshake, config, None);
                             tracing::info!("tunnel established with {}", peer_addr);
 
-                            // Process incoming OPEN requests
-                            crate::dial::handle_incoming_opens(tunnel, open_rx, cancel).await;
+                            // Process incoming OPEN requests (dial targets)
+                            let tunnel_for_reverse = tunnel.clone();
+                            let cancel_for_reverse = cancel.clone();
+                            tokio::spawn(crate::dial::handle_incoming_opens(
+                                tunnel,
+                                open_rx,
+                                cancel,
+                            ));
+
+                            // Process incoming RegisterReverse requests
+                            tokio::spawn(crate::forward::reverse::handle_reverse_requests(
+                                tunnel_for_reverse,
+                                reverse_rx,
+                                allow_reverse,
+                                registry,
+                                udp_idle_secs,
+                                cancel_for_reverse,
+                            ));
                         }
                         Err(e) => {
                             tracing::warn!("handshake failed from {}: {e}", peer_addr);

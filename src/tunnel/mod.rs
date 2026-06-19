@@ -24,10 +24,11 @@ use crate::crypto::handshake::{HandshakeResult, HandshakeRole};
 use crate::error::Result;
 use crate::metrics::{self, TunnelMetrics, STATE_CONNECTED, STATE_DISCONNECTED};
 use crate::proto::frame::{
-    self, decode_open_ack_payload, decode_open_payload, build_header, parse_header,
-    FrameType, HEADER_SIZE, MAX_PAYLOAD, TAG_SIZE,
+    self, decode_open_ack_payload, decode_open_payload, decode_register_reverse_ack_payload,
+    decode_register_reverse_payload, build_header, parse_header, FrameType, ReverseAckStatus,
+    HEADER_SIZE, MAX_PAYLOAD, TAG_SIZE,
 };
-use crate::proto::stream::{IncomingOpen, OutboundFrame, StreamHandle, StreamIn};
+use crate::proto::stream::{IncomingOpen, IncomingReverse, OutboundFrame, StreamHandle, StreamIn};
 
 /// Per-stream context stored in the tunnel's stream map.
 struct StreamCtx {
@@ -42,7 +43,8 @@ struct TunnelInner {
     write_tx: mpsc::Sender<OutboundFrame>,
     /// Active streams keyed by stream_id.
     streams: Mutex<HashMap<u32, StreamCtx>>,
-    /// Next stream ID (client allocates even IDs: 0, 2, 4, ...).
+    /// Next stream ID (client allocates even IDs: 0, 2, 4, ...;
+    /// server allocates odd IDs: 1, 3, 5, ...).
     next_id: AtomicU32,
     /// Role: Client (Node1) or Server (Node2).
     role: HandshakeRole,
@@ -61,6 +63,8 @@ struct TunnelInner {
     ping_waiter: Mutex<Option<oneshot::Sender<Duration>>>,
     /// Channel to deliver EchoReply payloads to the bench client.
     echo_reply_tx: Mutex<Option<mpsc::Sender<Bytes>>>,
+    /// One-shot waiter for `register_reverse()` — woken when a RegisterReverseAck arrives.
+    register_ack_waiter: Mutex<Option<oneshot::Sender<(ReverseAckStatus, String)>>>,
 }
 
 /// An established encrypted tunnel connection.
@@ -78,19 +82,22 @@ impl Tunnel {
     /// Unpin + Send + 'static` — e.g. `TcpStream`, a KCP stream, or a
     /// `Box<dyn Duplex>` from the transport layer.
     ///
-    /// Returns the tunnel handle and a receiver for incoming OPEN requests
-    /// (only relevant for the server role; the client can ignore it).
+    /// Returns the tunnel handle, a receiver for incoming OPEN requests
+    /// (both sides may receive OPENs in reverse-tunnel mode), and a receiver
+    /// for incoming RegisterReverse requests (only the server side consumes
+    /// these; the client side can drop the receiver).
     pub fn new<S>(
         stream: S,
         handshake: HandshakeResult,
         config: TunnelConfig,
         metrics_key: Option<&str>,
-    ) -> (Self, mpsc::Receiver<IncomingOpen>)
+    ) -> (Self, mpsc::Receiver<IncomingOpen>, mpsc::Receiver<IncomingReverse>)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (write_tx, write_rx) = mpsc::channel(512);
         let (open_tx, open_rx) = mpsc::channel(64);
+        let (reverse_tx, reverse_rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
 
         // Look up metrics from the global registry (if initialized).
@@ -104,10 +111,18 @@ impl Tunnel {
             *m.last_connected.lock().unwrap() = Some(Instant::now());
         }
 
+        // Stream ID allocation by role: Client uses even IDs (0, 2, 4, ...),
+        // Server uses odd IDs (1, 3, 5, ...). This prevents collisions when
+        // both sides open streams (required for reverse-tunnel mode).
+        let initial_id = match handshake.role {
+            HandshakeRole::Client => 0,
+            HandshakeRole::Server => 1,
+        };
+
         let inner = Arc::new(TunnelInner {
             write_tx: write_tx.clone(),
             streams: Mutex::new(HashMap::new()),
-            next_id: AtomicU32::new(0),
+            next_id: AtomicU32::new(initial_id),
             role: handshake.role,
             cancel: cancel.clone(),
             last_pong: Mutex::new(Instant::now()),
@@ -116,6 +131,7 @@ impl Tunnel {
             last_ping_sent: Mutex::new(None),
             ping_waiter: Mutex::new(None),
             echo_reply_tx: Mutex::new(None),
+            register_ack_waiter: Mutex::new(None),
         });
 
         let (read_half, write_half) = tokio::io::split(stream);
@@ -134,15 +150,19 @@ impl Tunnel {
             handshake.recv_cipher,
             inner.clone(),
             open_tx,
+            reverse_tx,
         ));
 
         // Spawn heartbeat task
         tokio::spawn(heartbeat_task(inner.clone(), config, cancel));
 
-        (Tunnel { inner }, open_rx)
+        (Tunnel { inner }, open_rx, reverse_rx)
     }
 
-    /// Client side: open a new stream to a target.
+    /// Open a new stream to a target (send an OPEN frame to the peer).
+    ///
+    /// Both sides can open streams — the client allocates even stream IDs
+    /// and the server allocates odd stream IDs, so there are no collisions.
     pub async fn open_stream(&self, proto_byte: u8, target: &str) -> Result<StreamHandle> {
         let id = self.inner.next_id.fetch_add(2, Ordering::SeqCst);
         let (in_tx, in_rx) = mpsc::channel(256);
@@ -209,6 +229,23 @@ impl Tunnel {
                 stream_id,
                 frame_type: FrameType::OpenAck,
                 payload: Bytes::from(frame::encode_open_ack_payload(success).to_vec()),
+            })
+            .await
+            .map_err(|_| crate::error::OpticalError::Tunnel("tunnel writer closed".into()))
+    }
+
+    /// Send a RegisterReverseAck control frame (stream_id=0).
+    pub async fn send_register_reverse_ack(
+        &self,
+        status: ReverseAckStatus,
+        msg: &str,
+    ) -> Result<()> {
+        self.inner
+            .write_tx
+            .send(OutboundFrame {
+                stream_id: 0,
+                frame_type: FrameType::RegisterReverseAck,
+                payload: Bytes::from(frame::encode_register_reverse_ack_payload(status, msg)),
             })
             .await
             .map_err(|_| crate::error::OpticalError::Tunnel("tunnel writer closed".into()))
@@ -372,6 +409,57 @@ impl Tunnel {
             elapsed_secs: elapsed,
         }
     }
+
+    /// Send a RegisterReverse control frame and wait for the peer's ack.
+    ///
+    /// Used by Node1 (client) to ask Node2 (server) to listen on `listen`
+    /// and forward incoming connections back through the tunnel to this
+    /// node, which dials `target`. Times out after 10 seconds.
+    pub async fn register_reverse(
+        &self,
+        proto_byte: u8,
+        listen: &str,
+        target: &str,
+    ) -> std::result::Result<(ReverseAckStatus, String), &'static str> {
+        if !self.is_alive() {
+            return Err("tunnel not alive");
+        }
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut waiter = self.inner.register_ack_waiter.lock().unwrap();
+            *waiter = Some(tx);
+        }
+
+        // Send RegisterReverse frame (stream_id=0 control frame)
+        let payload = frame::encode_register_reverse_payload(proto_byte, listen, target);
+        let send_ok = self
+            .inner
+            .write_tx
+            .send(OutboundFrame {
+                stream_id: 0,
+                frame_type: FrameType::RegisterReverse,
+                payload: Bytes::from(payload),
+            })
+            .await
+            .is_ok();
+
+        if !send_ok {
+            *self.inner.register_ack_waiter.lock().unwrap() = None;
+            return Err("failed to send RegisterReverse (tunnel writer closed)");
+        }
+
+        tracing::debug!("RegisterReverse sent: listen={listen} target={target}");
+
+        // Wait for ack with timeout
+        match tokio::time::timeout(Duration::from_secs(10), rx).await {
+            Ok(Ok(result)) => Ok(result),
+            _ => {
+                *self.inner.register_ack_waiter.lock().unwrap() = None;
+                Err("register reverse timeout (no ack within 10s)")
+            }
+        }
+    }
 }
 
 /// Result of a throughput benchmark.
@@ -452,6 +540,7 @@ async fn reader_task<R>(
     recv_cipher: AeadCipher,
     inner: std::sync::Arc<TunnelInner>,
     open_tx: mpsc::Sender<IncomingOpen>,
+    reverse_tx: mpsc::Sender<IncomingReverse>,
 ) where
     R: AsyncRead + Unpin + Send,
 {
@@ -492,24 +581,23 @@ async fn reader_task<R>(
 
         match frame_type {
             FrameType::Open => {
-                if inner.role == HandshakeRole::Server {
-                    // Parse OPEN payload
-                    match decode_open_payload(&plaintext) {
-                        Ok((proto_byte, target)) => {
-                            let _ = open_tx
-                                .send(IncomingOpen {
-                                    stream_id,
-                                    proto_byte,
-                                    target,
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            tracing::warn!(stream_id, "invalid OPEN payload: {e}");
-                        }
+                // Both client and server sides handle OPEN: the receiver dials
+                // the target. In normal mode only the server receives OPENs;
+                // in reverse-tunnel mode the client also receives OPENs (sent
+                // by the server which is listening on the reverse port).
+                match decode_open_payload(&plaintext) {
+                    Ok((proto_byte, target)) => {
+                        let _ = open_tx
+                            .send(IncomingOpen {
+                                stream_id,
+                                proto_byte,
+                                target,
+                            })
+                            .await;
                     }
-                } else {
-                    tracing::warn!(stream_id, "received OPEN on client side, ignoring");
+                    Err(e) => {
+                        tracing::warn!(stream_id, "invalid OPEN payload: {e}");
+                    }
                 }
             }
             FrameType::OpenAck => {
@@ -616,6 +704,40 @@ async fn reader_task<R>(
                 };
                 if let Some(tx) = tx {
                     let _ = tx.send(Bytes::from(plaintext)).await;
+                }
+            }
+            FrameType::RegisterReverse => {
+                // Only the server side (Node2) is expected to receive these.
+                // The server's reverse handler consumes the channel; on the
+                // client side the channel is dropped so the send fails silently.
+                match decode_register_reverse_payload(&plaintext) {
+                    Ok((proto_byte, listen, target)) => {
+                        tracing::info!(
+                            "received RegisterReverse: proto={proto_byte} listen={listen} target={target}"
+                        );
+                        let _ = reverse_tx
+                            .send(IncomingReverse {
+                                proto_byte,
+                                listen,
+                                target,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("invalid RegisterReverse payload: {e}");
+                    }
+                }
+            }
+            FrameType::RegisterReverseAck => {
+                // Wake the register_reverse() waiter (client side).
+                let (status, msg) = decode_register_reverse_ack_payload(&plaintext)
+                    .unwrap_or((ReverseAckStatus::Conflict, "decode error".into()));
+                let waiter = {
+                    let mut w = inner.register_ack_waiter.lock().unwrap();
+                    w.take()
+                };
+                if let Some(tx) = waiter {
+                    let _ = tx.send((status, msg));
                 }
             }
         }

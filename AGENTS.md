@@ -48,9 +48,10 @@ src/
 │   ├── client.rs        #   隧道客户端:握手 + 指数退避重连
 │   └── server.rs        #   隧道服务端:接受连接 + 握手
 ├── forward/             # 前向转发(Node1)
-│   ├── mod.rs           #   按隧道地址分组、启动转发器
-│   ├── tcp.rs           #   TCP 转发器
-│   └── udp.rs           #   UDP 转发器(按源地址维护会话)
+│   ├── mod.rs           #   按隧道地址分组、启动转发器、分离 reverse 项
+│   ├── tcp.rs           #   TCP 转发器(含 forward_via_tunnel 可复用核心)
+│   ├── udp.rs           #   UDP 转发器(含 udp_session_with_tunnel 可复用核心)
+│   └── reverse.rs       #   反向隧道:RegisterReverse 注册/监听/冲突检测
 ├── dial/                # 拨号(Node2)
 │   ├── mod.rs           #   处理入站 OPEN 请求
 │   ├── tcp.rs           #   TCP 拨号
@@ -73,10 +74,10 @@ src/
 [4B stream_id][8B counter][1B frame_type][2B payload_len][payload (AEAD ciphertext + 16B tag)]
 ```
 
-帧类型:`Open(0x01)` `OpenAck(0x02)` `Data(0x03)` `Close(0x04)` `Ping(0x05)` `Pong(0x06)` `Echo(0x07)` `EchoReply(0x08)`
+帧类型:`Open(0x01)` `OpenAck(0x02)` `Data(0x03)` `Close(0x04)` `Ping(0x05)` `Pong(0x06)` `Echo(0x07)` `EchoReply(0x08)` `RegisterReverse(0x09)` `RegisterReverseAck(0x0A)`
 
-- `stream_id=0` 用于控制帧(Ping/Pong/Echo/EchoReply)
-- 客户端分配偶数 stream_id (0, 2, 4, ...),服务端用 OPEN 请求中的 stream_id
+- `stream_id=0` 用于控制帧(Ping/Pong/Echo/EchoReply/**RegisterReverse**/**RegisterReverseAck**)
+- 客户端分配偶数 stream_id (0, 2, 4, ...),服务端分配奇数 stream_id (1, 3, 5, ...)——反向隧道模式下两端都会发 OPEN,按角色区分避免冲突
 - 每流维护独立 send/recv counter 用于 AEAD nonce 和防重放
 
 ### 隧道核心 (tunnel/mod.rs)
@@ -91,10 +92,36 @@ src/
 - `metrics: Option<Arc<TunnelMetrics>>` — 从全局注册表查找,空则不采集
 - `ping_waiter: Mutex<Option<oneshot::Sender<Duration>>>` — `ping_once()` 的等待通道
 - `echo_reply_tx: Mutex<Option<mpsc::Sender<Bytes>>>` — bench 测试的回复通道
+- `register_ack_waiter: Mutex<Option<oneshot::Sender<(ReverseAckStatus, String)>>>` — `register_reverse()` 的等待通道
 
 ### 传输层抽象 (transport/)
 
 `Connect` 和 `Listen` trait 解耦隧道 I/O 与底层网络协议。新增传输(如 KCP)只需实现这两个 trait,返回 `BoxDuplex`(`Box<dyn Duplex>`),隧道代码无需修改。
+
+### 反向隧道 (forward/reverse.rs)
+
+反向隧道模式允许 Node2(隧道服务端)监听端口,将连接通过隧道发回给 Node1(隧道客户端),由 Node1 拨号到目标。适用于 Node1 位于 NAT 后无公网 IP 的场景。
+
+**数据流对比:**
+
+| 模式 | listen 方 | OPEN 方向 | dial 方 |
+|------|----------|----------|---------|
+| 普通 | Node1 | Node1→Node2(偶数 ID) | Node2 |
+| 反向 | Node2 | Node2→Node1(奇数 ID) | Node1 |
+
+**协议流程:**
+1. Node1 隧道建立后发送 `RegisterReverse(proto, listen, target)` 给 Node2
+2. Node2 检查全局 `ReverseRegistry` 是否冲突 → 绑定监听 → 回复 `RegisterReverseAck(status, msg)`
+3. Node2 收到连接后用奇数 stream_id 发 OPEN 给 Node1 → Node1 走 `dial::handle_incoming_opens` 拨号
+4. 隧道断开时 Node2 的反向监听器随之销毁并释放端口;Node1 重连后重新注册
+
+**关键组件:**
+- `ReverseRegistry`:全局 `Arc<Mutex<HashMap<SocketAddr, CancellationToken>>>`,跨所有隧道连接共享,防止端口冲突。陈旧条目(已取消的令牌)自动淘汰。
+- `register_reverse_forwarders`:Node1 侧注册循环——等隧道 → 串行注册所有 reverse 项 → 等隧道断开 → 重连后重新注册。任一注册失败(conflict/disabled)返回 `Err`,导致进程退出。
+- `handle_reverse_requests`:Node2 侧消费 `IncomingReverse` 通道——检查 `allow_reverse` → 注册 → 绑定 → 回复 ack → spawn 监听器。
+- `Tunnel::register_reverse()`:发送 `RegisterReverse` 帧并等待 ack(oneshot + 10s 超时),复用 `register_ack_waiter` 模式(类似 `ping_waiter`)。
+
+**进程级退出:** 反向注册失败时,`run_forwarders` 返回 `Err` → `app.rs` 传播错误 → `main()` 以非零码退出。作为服务运行时,Windows SCM 报告 `ServiceExitCode::ServiceSpecific(1)`,systemd 检测到非零退出码。
 
 ### 可观测性架构
 
@@ -135,7 +162,8 @@ src/
 1. `proto/frame.rs` 的 `FrameType` enum 添加变体
 2. `from_u8()` 添加 match arm
 3. `tunnel/mod.rs` 的 `reader_task` 添加处理分支
-4. 如需客户端侧响应,在 `TunnelInner` 添加等待通道(参考 `ping_waiter`/`echo_reply_tx`)
+4. 如需客户端侧响应,在 `TunnelInner` 添加等待通道(参考 `ping_waiter`/`echo_reply_tx`/`register_ack_waiter`)
+5. 如需服务端侧处理,在 `Tunnel::new` 创建 mpsc channel 并由 `reader_task` 投递(参考 `open_tx`/`reverse_tx`),消费端在 `tunnel/server.rs` 中 spawn
 
 ### 新增 CLI 子命令
 
@@ -164,7 +192,7 @@ src/
 - 每个进程只有一个注册表
 - `try_get()` 返回 `Option`,未初始化时安全降级(不采集)
 
-`Tunnel::new()` 接收 `metrics_key: Option<&str>` 参数,在注册表中查找对应的 `TunnelMetrics`。服务端隧道传 `None`(服务端暂不采集单隧道指标),客户端隧道传 `Some(&addr)`。
+`Tunnel::new()` 接收 `metrics_key: Option<&str>` 参数,在注册表中查找对应的 `TunnelMetrics`。服务端隧道传 `None`(服务端暂不采集单隧道指标),客户端隧道传 `Some(&addr)`。返回三元组 `(Tunnel, Receiver<IncomingOpen>, Receiver<IncomingReverse>)`——客户端消费 open_rx 用于反向隧道拨号,服务端同时消费 open_rx 和 reverse_rx。
 
 ### mark_disconnected 原子性
 

@@ -40,6 +40,11 @@ pub struct Config {
     /// Example: "127.0.0.1:9100"
     #[serde(default)]
     pub admin_listen: Option<SocketAddr>,
+    /// Whether to accept reverse tunnel registrations from peers (Node2 role).
+    /// When `false`, incoming RegisterReverse frames are rejected with status=disabled.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub allow_reverse: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +57,11 @@ pub struct ForwarderConfig {
     pub tunnel: String,
     /// Final target address "host:port"
     pub target: String,
+    /// Reverse mode: if true, the peer (Node2) listens on `listen` and forwards
+    /// connections back through the tunnel to this node (Node1), which dials `target`.
+    /// Default: false (normal mode — this node listens and the peer dials).
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +104,9 @@ fn default_reconnect_max() -> u64 {
 }
 fn default_udp_idle() -> u64 {
     60
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Config {

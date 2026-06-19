@@ -65,11 +65,26 @@ impl StreamHandle {
     }
 }
 
-/// An incoming OPEN request (server side only).
+/// An incoming OPEN request.
+///
+/// Both client and server sides may receive OPEN frames in reverse-tunnel
+/// mode, so this is delivered to whichever side needs to dial the target.
 #[derive(Debug)]
 pub struct IncomingOpen {
     pub stream_id: u32,
     pub proto_byte: u8,
+    pub target: String,
+}
+
+/// An incoming RegisterReverse request (server side only).
+///
+/// The server is asked to listen on `listen` and, for each accepted
+/// connection, open a stream back to the client with `target` as the
+/// dial target.
+#[derive(Debug)]
+pub struct IncomingReverse {
+    pub proto_byte: u8,
+    pub listen: String,
     pub target: String,
 }
 

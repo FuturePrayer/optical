@@ -21,6 +21,7 @@ use crate::metrics::{self, ForwarderMetrics};
 use crate::proto::frame::FrameType;
 use crate::proto::stream::{OutboundFrame, StreamIn};
 use crate::tunnel::client::TunnelClient;
+use crate::tunnel::Tunnel;
 
 /// Run a UDP forwarder: listen on `listen`, forward to `target` via tunnel.
 pub async fn run(
@@ -119,7 +120,7 @@ async fn udp_session(
     target: String,
     tunnel_client: Arc<Mutex<TunnelClient>>,
     sessions: Arc<Mutex<HashMap<SocketAddr, tokio::sync::mpsc::Sender<Bytes>>>>,
-    mut data_rx: tokio::sync::mpsc::Receiver<Bytes>,
+    data_rx: tokio::sync::mpsc::Receiver<Bytes>,
     udp_idle: Duration,
     cancel: CancellationToken,
     metrics: Option<Arc<ForwarderMetrics>>,
@@ -137,6 +138,24 @@ async fn udp_session(
         }
     };
 
+    udp_session_with_tunnel(socket, src, target, tunnel, sessions, data_rx, udp_idle, cancel, metrics)
+        .await
+}
+
+/// Core UDP session logic with a [`Tunnel`] directly (no TunnelClient).
+///
+/// Used by both the normal forwarder and the reverse listener.
+pub async fn udp_session_with_tunnel(
+    socket: Arc<UdpSocket>,
+    src: SocketAddr,
+    target: String,
+    tunnel: Tunnel,
+    sessions: Arc<Mutex<HashMap<SocketAddr, tokio::sync::mpsc::Sender<Bytes>>>>,
+    mut data_rx: tokio::sync::mpsc::Receiver<Bytes>,
+    udp_idle: Duration,
+    cancel: CancellationToken,
+    metrics: Option<Arc<ForwarderMetrics>>,
+) -> Result<()> {
     // Open stream
     let handle = tunnel
         .open_stream(proto_to_byte(crate::config::Protocol::Udp), &target)

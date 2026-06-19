@@ -20,10 +20,22 @@ mldsa_public_key: "./keys/node.pub"
 # Omit this field to disable the Node2 role.
 tunnel_listen: "0.0.0.0:9000"
 
+# Whether to accept reverse tunnel registrations from peers.
+# When false, incoming RegisterReverse frames are rejected with status=disabled
+# and the requesting Node1 will exit with an error.
+# Default: true. Set to false to hard-disable reverse tunneling on this node.
+allow_reverse: true
+
 # ── Node1 role: local port forwarders ───────────────────────────────────────
 # Omit or leave empty to disable the Node1 role.
 # Each forwarder listens on a local port and forwards traffic through the
 # specified tunnel to the specified final target.
+#
+# Set `reverse: true` to flip the direction: the peer (Node2) listens on
+# `listen` and sends connections back through the tunnel to this node (Node1),
+# which dials `target`. This is useful when Node1 is behind NAT without a
+# public IP. Only the first Node1 to request a given listen address succeeds;
+# subsequent Node1s exit with an error.
 forwarders:
   # TCP: forward local port 8080 to target 10.0.0.5:80 via tunnel at peer:9000
   - listen: "127.0.0.1:8080"
@@ -42,6 +54,23 @@ forwarders:
     proto: tcp
     tunnel: "other-peer.example.com:9000"
     target: "192.168.1.100:22"
+
+  # Reverse TCP: the peer (Node2) listens on 9090 and sends connections back
+  # through the tunnel to this node (Node1), which dials 192.168.1.100:22.
+  # Useful when this node is behind NAT and cannot accept inbound connections.
+  - listen: "0.0.0.0:9090"
+    proto: tcp
+    tunnel: "peer.example.com:9000"
+    target: "192.168.1.100:22"
+    reverse: true
+
+  # Reverse UDP: the peer (Node2) listens on 5354 and sends datagrams back
+  # through the tunnel to this node (Node1), which dials 192.168.1.1:53.
+  - listen: "0.0.0.0:5354"
+    proto: udp
+    tunnel: "peer.example.com:9000"
+    target: "192.168.1.1:53"
+    reverse: true
 
 # ── Tunnel parameters ───────────────────────────────────────────────────────
 tunnel:

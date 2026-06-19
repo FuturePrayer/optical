@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::admin::TunnelRegistry;
 use crate::config::Config;
 use crate::crypto::pqdsa;
+use crate::forward::reverse::ReverseRegistry;
 use crate::metrics;
 
 /// Console mode: runs the application with signal-based shutdown.
@@ -59,6 +60,10 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
     // Tunnel client registry — shared with admin API for ping/bench
     let tunnel_registry = Arc::new(TunnelRegistry::new());
 
+    // Reverse tunnel registry — shared across all tunnel connections on the
+    // server side to prevent listen-address conflicts.
+    let reverse_registry = Arc::new(ReverseRegistry::new());
+
     // Load ML-DSA key pair
     let dsa_keypair = pqdsa::load_keypair(&config.mldsa_private_key, &config.mldsa_public_key)
         .context("failed to load ML-DSA key pair")?;
@@ -74,6 +79,8 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         let dsa_keypair = dsa_keypair.clone();
         let cancel = cancel.clone();
         let tunnel_cfg = config.tunnel.clone();
+        let allow_reverse = config.allow_reverse;
+        let rev_registry = reverse_registry.clone();
         handles.push(tokio::spawn(async move {
             if let Err(e) = crate::tunnel::server::run(
                 crate::transport::tcp::TcpTransport,
@@ -81,6 +88,8 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
                 psk,
                 dsa_keypair,
                 tunnel_cfg,
+                allow_reverse,
+                rev_registry,
                 cancel,
             )
             .await
@@ -90,7 +99,12 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         }));
     }
 
-    // Spawn forwarders (Node1 role) if configured
+    // Spawn forwarders (Node1 role) if configured.
+    // A shared error slot captures fatal errors from reverse registration —
+    // when set, the process should exit with a non-zero code.
+    let forwarder_error: Arc<std::sync::Mutex<Option<anyhow::Error>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     if !config.forwarders.is_empty() {
         let forwarders = config.forwarders.clone();
         let psk = psk;
@@ -98,8 +112,9 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         let tunnel_cfg = config.tunnel.clone();
         let cancel = cancel.clone();
         let registry = tunnel_registry.clone();
+        let fwd_error = forwarder_error.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = crate::forward::run_forwarders(
+            let result = crate::forward::run_forwarders(
                 crate::transport::tcp::TcpTransport,
                 forwarders,
                 psk,
@@ -108,9 +123,10 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
                 cancel,
                 registry,
             )
-            .await
-            {
+            .await;
+            if let Err(e) = result {
                 tracing::error!("forwarder error: {e:#}");
+                *fwd_error.lock().unwrap() = Some(e);
             }
         }));
     }
@@ -133,5 +149,13 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
     }
 
     tracing::info!("optical shutdown complete");
+
+    // If a forwarder had a fatal error (e.g. reverse registration conflict),
+    // propagate it so the process exits with a non-zero code. When running
+    // as a service, the SCM/systemd will report the service as stopped.
+    if let Some(e) = forwarder_error.lock().unwrap().take() {
+        return Err(e);
+    }
+
     Ok(())
 }

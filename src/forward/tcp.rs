@@ -13,6 +13,7 @@ use crate::crypto::handshake::proto_to_byte;
 use crate::metrics;
 use crate::proto::stream::{copy_tcp_bidirectional, StreamIn};
 use crate::tunnel::client::TunnelClient;
+use crate::tunnel::Tunnel;
 
 /// Run a TCP forwarder: listen on `listen`, forward to `target` via tunnel.
 pub async fn run(
@@ -72,7 +73,7 @@ async fn handle_connection(
     local: tokio::net::TcpStream,
     target: String,
     tunnel_client: Arc<Mutex<TunnelClient>>,
-    cancel: CancellationToken,
+    _cancel: CancellationToken,
     metrics: Option<Arc<metrics::ForwarderMetrics>>,
 ) -> Result<()> {
     // Get tunnel (waits for connection if needed)
@@ -87,8 +88,24 @@ async fn handle_connection(
         }
     };
 
+    forward_via_tunnel(local, target, tunnel, metrics).await
+}
+
+/// Core TCP forwarding: open a stream to `target` via `tunnel`, wait for
+/// OPEN_ACK, then copy bidirectionally.
+///
+/// Used by both the normal forwarder (via [`TunnelClient`]) and the reverse
+/// listener (via [`Tunnel`] directly).
+pub async fn forward_via_tunnel(
+    local: tokio::net::TcpStream,
+    target: String,
+    tunnel: Tunnel,
+    metrics: Option<Arc<metrics::ForwarderMetrics>>,
+) -> Result<()> {
     // Open stream
-    let handle = tunnel.open_stream(proto_to_byte(crate::config::Protocol::Tcp), &target).await?;
+    let handle = tunnel
+        .open_stream(proto_to_byte(crate::config::Protocol::Tcp), &target)
+        .await?;
 
     let stream_id = handle.id;
     let tx = handle.tx.clone();
@@ -116,6 +133,5 @@ async fn handle_connection(
     copy_tcp_bidirectional(read_half, write_half, stream_id, tx, rx, metrics).await;
     tunnel.remove_stream(stream_id);
 
-    let _ = cancel; // suppress unused warning
     Ok(())
 }
