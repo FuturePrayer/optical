@@ -33,7 +33,7 @@ const USER_AGENT: &str = concat!(
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const ASSET_NAME: &str = "optical-x86_64-pc-windows-msvc.exe";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const ASSET_NAME: &str = "optical-x86_64-unknown-linux-gnu";
+const ASSET_NAME: &str = "optical-x86_64-unknown-linux-musl";
 
 /// Download/API timeout (covers slow networks for a ~10MB binary).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
