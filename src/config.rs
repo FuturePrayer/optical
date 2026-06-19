@@ -45,6 +45,11 @@ pub struct Config {
     /// Default: true.
     #[serde(default = "default_true")]
     pub allow_reverse: bool,
+    /// Directory for daily-rotating log files. When set, logs are written to
+    /// rolling files in this directory (one file per day) in addition to
+    /// stdout. When omitted, logs go to stdout only.
+    #[serde(default)]
+    pub log_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

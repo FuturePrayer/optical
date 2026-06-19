@@ -551,6 +551,7 @@ fn cli_init(
 
     let config_path = base.join("config.yml");
     let keys_dir = base.join("keys");
+    let logs_dir = base.join("logs");
     let priv_key = keys_dir.join("node.key");
     let pub_key = keys_dir.join("node.pub");
 
@@ -583,7 +584,7 @@ fn cli_init(
     // Generate a PSK and render the config from the template.
     let psk = crypto::kdf::generate_psk();
     let psk_hex = format!("hex:{}", hex::encode(psk));
-    let config_content = paths::render_config(&psk_hex, &priv_key, &pub_key);
+    let config_content = paths::render_config(&psk_hex, &priv_key, &pub_key, &logs_dir);
     std::fs::write(&config_path, config_content)?;
 
     // Summary + reminder.

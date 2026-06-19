@@ -16,6 +16,12 @@ psk: "hex:0000000000000000000000000000000000000000000000000000000000000000"
 mldsa_private_key: "./keys/node.key"
 mldsa_public_key: "./keys/node.pub"
 
+# Directory for daily-rotating log files. When set, logs are written to
+# rolling files in this directory (one file per day, e.g. optical.log.2026-06-19)
+# in addition to stdout. Set to null or omit to log to stdout only.
+# Default: "./logs" (sibling of the keys directory).
+log_dir: "./logs"
+
 # ── Node2 role: tunnel server (accept incoming tunnels) ─────────────────────
 # Omit this field to disable the Node2 role.
 tunnel_listen: "0.0.0.0:9000"

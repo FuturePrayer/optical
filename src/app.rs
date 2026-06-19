@@ -1,6 +1,7 @@
 //! Application orchestration: load config, start tunnel server + forwarders,
 //! and drive graceful shutdown via a [`CancellationToken`].
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -36,15 +37,11 @@ pub async fn run(config_path: &str) -> Result<()> {
 /// This is shared between console mode ([`run`]) and Windows SCM service mode
 /// (the STOP control cancels the token).
 pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let config = Config::load(config_path).context("failed to load config")?;
+
+    // Initialize logging. The returned guard must be held alive for the whole
+    // process lifetime so that the non-blocking file writer flushes on exit.
+    let _log_guard = init_logging(&config.log_dir);
 
     tracing::info!("optical starting up");
     tracing::info!(
@@ -158,4 +155,61 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
     }
 
     Ok(())
+}
+
+/// Initialize the global tracing subscriber.
+///
+/// Logs always go to stdout. When `log_dir` is `Some`, logs are *additionally*
+/// written to daily-rotating files in that directory
+/// (e.g. `optical.log.2026-06-19`).
+///
+/// Returns the [`WorkerGuard`] for the non-blocking file writer when file
+/// logging is enabled. The guard must be held for the lifetime of the process
+/// to ensure buffered logs are flushed on exit; dropping it early is safe but
+/// may lose the most recent buffered lines.
+fn init_logging(log_dir: &Option<PathBuf>) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+
+    let Some(dir) = log_dir else {
+        // stdout-only (backwards-compatible behavior).
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
+            .init();
+        return None;
+    };
+
+    // Create the log directory if it doesn't exist.
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!(
+            "warning: failed to create log dir '{}': {e}; logging to stdout only",
+            dir.display()
+        );
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
+            .init();
+        return None;
+    }
+
+    let file_appender = tracing_appender::rolling::daily(dir, "optical.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false) // strip ANSI colors from file output
+        .with_writer(non_blocking);
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+
+    tracing::info!("logging to daily-rotating files in {}", dir.display());
+    Some(guard)
 }
