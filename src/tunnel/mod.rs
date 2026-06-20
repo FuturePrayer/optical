@@ -9,7 +9,7 @@ pub mod client;
 pub mod server;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,8 +43,9 @@ struct TunnelInner {
     write_tx: mpsc::Sender<OutboundFrame>,
     /// Active streams keyed by stream_id.
     streams: Mutex<HashMap<u32, StreamCtx>>,
-    /// Next stream ID (client allocates even IDs: 0, 2, 4, ...;
+    /// Next stream ID (client allocates even IDs: 2, 4, 6, ...;
     /// server allocates odd IDs: 1, 3, 5, ...).
+    /// stream_id=0 is reserved for control frames (PING/PONG/Echo/etc.).
     next_id: AtomicU32,
     /// Role: Client (Node1) or Server (Node2).
     role: HandshakeRole,
@@ -57,10 +58,24 @@ struct TunnelInner {
     /// Metrics for this tunnel (None if observability is disabled or
     /// the tunnel has no registered metrics entry).
     metrics: Option<Arc<TunnelMetrics>>,
-    /// Time the last PING was sent (for RTT calculation).
+    /// Time the last heartbeat PING was sent (for RTT calculation).
+    /// Used exclusively by the heartbeat task; `ping_once()` uses
+    /// `ping_once_sent` to avoid races.
     last_ping_sent: Mutex<Option<Instant>>,
+    /// Dedicated send counter for control frames (stream_id=0).
+    /// Control frames (PING/PONG/Echo/RegisterReverse/etc.) are not tied
+    /// to any data stream and must always be sendable, independent of
+    /// the `streams` map (which only tracks data streams). Without this,
+    /// closing the first data stream (which used to get stream_id=0)
+    /// would remove `streams[0]`, causing all subsequent control frames
+    /// to be silently dropped by `pack_frame`.
+    control_send_counter: AtomicU64,
     /// One-shot waiter for `ping_once()` — woken when a PONG arrives.
     ping_waiter: Mutex<Option<oneshot::Sender<Duration>>>,
+    /// Send time of the PING issued by `ping_once()`. Separate from
+    /// `last_ping_sent` (heartbeat) so the two mechanisms don't
+    /// overwrite each other's timestamp.
+    ping_once_sent: Mutex<Option<Instant>>,
     /// Channel to deliver EchoReply payloads to the bench client.
     echo_reply_tx: Mutex<Option<mpsc::Sender<Bytes>>>,
     /// One-shot waiter for `register_reverse()` — woken when a RegisterReverseAck arrives.
@@ -111,11 +126,16 @@ impl Tunnel {
             *m.last_connected.lock().unwrap() = Some(Instant::now());
         }
 
-        // Stream ID allocation by role: Client uses even IDs (0, 2, 4, ...),
-        // Server uses odd IDs (1, 3, 5, ...). This prevents collisions when
-        // both sides open streams (required for reverse-tunnel mode).
+        // Stream ID allocation by role: Client uses even IDs (2, 4, 6, ...),
+        // Server uses odd IDs (1, 3, 5, ...). stream_id=0 is reserved for
+        // control frames (PING/PONG/Echo/RegisterReverse/etc.) so they are
+        // never confused with data streams. This prevents a critical bug
+        // where the first data stream (previously stream_id=0) would collide
+        // with control frames: once that stream closed, `pack_frame` would
+        // silently drop all PINGs/PONGs, causing heartbeat timeouts and
+        // 100% ping loss.
         let initial_id = match handshake.role {
-            HandshakeRole::Client => 0,
+            HandshakeRole::Client => 2,
             HandshakeRole::Server => 1,
         };
 
@@ -129,7 +149,9 @@ impl Tunnel {
             alive: AtomicBool::new(true),
             metrics,
             last_ping_sent: Mutex::new(None),
+            control_send_counter: AtomicU64::new(0),
             ping_waiter: Mutex::new(None),
+            ping_once_sent: Mutex::new(None),
             echo_reply_tx: Mutex::new(None),
             register_ack_waiter: Mutex::new(None),
         });
@@ -162,7 +184,9 @@ impl Tunnel {
     /// Open a new stream to a target (send an OPEN frame to the peer).
     ///
     /// Both sides can open streams — the client allocates even stream IDs
-    /// and the server allocates odd stream IDs, so there are no collisions.
+    /// (2, 4, 6, ...) and the server allocates odd stream IDs (1, 3, 5, ...),
+    /// so there are no collisions. stream_id=0 is reserved for control
+    /// frames and never assigned to data streams.
     pub async fn open_stream(&self, proto_byte: u8, target: &str) -> Result<StreamHandle> {
         let id = self.inner.next_id.fetch_add(2, Ordering::SeqCst);
         let (in_tx, in_rx) = mpsc::channel(256);
@@ -252,7 +276,15 @@ impl Tunnel {
     }
 
     /// Remove a stream from the tunnel (cleanup).
+    ///
+    /// stream_id=0 is reserved for control frames and must never be removed
+    /// (control frames don't live in the `streams` map, but this guard
+    /// prevents a data stream that somehow got id=0 — e.g. from an old
+    /// client — from corrupting control-frame send bookkeeping when closed).
     pub fn remove_stream(&self, stream_id: u32) {
+        if stream_id == 0 {
+            return;
+        }
         let mut streams = self.inner.streams.lock().unwrap();
         streams.remove(&stream_id);
     }
@@ -284,6 +316,10 @@ impl Tunnel {
     ///
     /// Reuses the existing heartbeat PING/PONG protocol (stream_id=0, empty
     /// payload). Times out after 10 seconds.
+    ///
+    /// Uses a dedicated `ping_once_sent` timestamp (separate from the
+    /// heartbeat's `last_ping_sent`) so that concurrent heartbeat PINGs
+    /// don't overwrite this method's send time and steal its PONG.
     pub async fn ping_once(&self) -> std::result::Result<Duration, &'static str> {
         if !self.is_alive() {
             return Err("tunnel not alive");
@@ -296,8 +332,8 @@ impl Tunnel {
             *waiter = Some(tx);
         }
         {
-            let mut last_ping = self.inner.last_ping_sent.lock().unwrap();
-            *last_ping = Some(Instant::now());
+            let mut sent = self.inner.ping_once_sent.lock().unwrap();
+            *sent = Some(Instant::now());
         }
 
         // Send PING
@@ -314,6 +350,7 @@ impl Tunnel {
 
         if !send_ok {
             *self.inner.ping_waiter.lock().unwrap() = None;
+            *self.inner.ping_once_sent.lock().unwrap() = None;
             return Err("failed to send PING (tunnel writer closed)");
         }
 
@@ -322,6 +359,7 @@ impl Tunnel {
             Ok(Ok(rtt)) => Ok(rtt),
             _ => {
                 *self.inner.ping_waiter.lock().unwrap() = None;
+                *self.inner.ping_once_sent.lock().unwrap() = None;
                 Err("ping timeout (no PONG within 10s)")
             }
         }
@@ -580,8 +618,13 @@ fn pack_frame(
     send_cipher: &AeadCipher,
     inner: &TunnelInner,
 ) -> PackResult {
-    // Get and increment send counter for this stream.
-    let counter = {
+    // Control frames (stream_id=0) use a dedicated atomic counter. They are
+    // not tied to any data stream and must always be sendable, regardless of
+    // the `streams` map state. Data frames look up their per-stream counter
+    // in the map; if the stream was closed, the frame is dropped.
+    let counter = if frame.stream_id == 0 {
+        inner.control_send_counter.fetch_add(1, Ordering::SeqCst)
+    } else {
         let mut streams = inner.streams.lock().unwrap();
         match streams.get_mut(&frame.stream_id) {
             Some(ctx) => {
@@ -770,32 +813,41 @@ async fn reader_task<R>(
             }
             FrameType::Pong => {
                 let now = Instant::now();
+                // Always update last_pong (used by heartbeat timeout check).
                 {
                     let mut last = inner.last_pong.lock().unwrap();
                     *last = now;
                 }
-                // Compute RTT from last PING send time
-                let rtt = {
-                    let mut last_ping = inner.last_ping_sent.lock().unwrap();
-                    if let Some(t) = *last_ping {
-                        *last_ping = None;
-                        Some(now.duration_since(t))
-                    } else {
-                        None
-                    }
+
+                // Priority 1: ping_once() waiter. If an explicit ping is
+                // waiting, compute RTT from its dedicated send timestamp
+                // (`ping_once_sent`) and deliver the result. This takes
+                // precedence over the heartbeat RTT so that a concurrent
+                // heartbeat PING doesn't steal the PONG.
+                let once_waiter = {
+                    let mut w = inner.ping_waiter.lock().unwrap();
+                    w.take()
                 };
-                if let Some(rtt) = rtt {
-                    // Update metrics
+                if let Some(tx) = once_waiter {
+                    let rtt = {
+                        let mut sent = inner.ping_once_sent.lock().unwrap();
+                        sent.take().map(|t| now.duration_since(t))
+                    };
+                    let rtt = rtt.unwrap_or(Duration::ZERO);
                     if let Some(ref m) = inner.metrics {
                         m.rtt_us.store(rtt.as_micros() as u64, Ordering::Relaxed);
                     }
-                    // Wake ping waiter
-                    let waiter = {
-                        let mut w = inner.ping_waiter.lock().unwrap();
-                        w.take()
+                    let _ = tx.send(rtt);
+                } else {
+                    // Priority 2: heartbeat RTT (for metrics only, no waiter).
+                    let rtt = {
+                        let mut last_ping = inner.last_ping_sent.lock().unwrap();
+                        last_ping.take().map(|t| now.duration_since(t))
                     };
-                    if let Some(tx) = waiter {
-                        let _ = tx.send(rtt);
+                    if let Some(rtt) = rtt {
+                        if let Some(ref m) = inner.metrics {
+                            m.rtt_us.store(rtt.as_micros() as u64, Ordering::Relaxed);
+                        }
                     }
                 }
             }
