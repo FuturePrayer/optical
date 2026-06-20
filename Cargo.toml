@@ -35,6 +35,10 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+# Local timezone for log timestamps and daily-rotation date (avoids hand-rolled
+# cross-platform TZ-offset arithmetic, which is error-prone). `clock` feature
+# provides `chrono::Local::now()`; std-only, no wasm-bindgen.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Error handling
 anyhow = "1"

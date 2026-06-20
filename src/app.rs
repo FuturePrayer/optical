@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use tokio_util::sync::CancellationToken;
 
 use crate::admin::TunnelRegistry;
@@ -180,12 +181,17 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
 /// Logs always go to stdout. When `log_dir` is `Some`, logs are *additionally*
 /// written to rolling files in that directory. Rotation is triggered by two
 /// conditions (whichever fires first):
-/// - **Daily**: a new date (UTC) opens a new file.
+/// - **Daily**: a new date (local timezone) opens a new file.
 /// - **Size cap**: when `max_size_mb > 0` and the current file reaches
 ///   `max_size_mb` MiB, a new file with an incremented sequence suffix opens.
 ///
 /// File naming: `optical.log.YYYY-MM-DD[.N]` where `.N` is the sequence
-/// number within a day (omitted for the first file).
+/// number within a day (omitted for the first file). The date is the local
+/// date.
+///
+/// Timestamps in log records use the system's local timezone (e.g.
+/// `2026-06-20T17:44:00.123+08:00`) rather than UTC, for both stdout and
+/// file output.
 ///
 /// Retention: files older than `retention_days` (by mtime) are deleted on
 /// startup and after each daily rotation. Set `retention_days = 0` to disable.
@@ -205,7 +211,11 @@ fn init_logging(
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+    // Both stdout and file layers format timestamps in the local timezone
+    // instead of the default UTC, so log times match the operator's wall clock.
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_timer(LocalTimer);
 
     let Some(dir) = log_dir else {
         // stdout-only (backwards-compatible behavior).
@@ -238,7 +248,8 @@ fn init_logging(
     let (non_blocking, guard) = tracing_appender::non_blocking(writer);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
-        .with_writer(non_blocking);
+        .with_writer(non_blocking)
+        .with_timer(LocalTimer);
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -255,6 +266,22 @@ fn init_logging(
         retention_str
     );
     Some(guard)
+}
+
+/// `tracing` timestamp formatter that renders the local timezone (e.g.
+/// `2026-06-20T17:44:00.123+08:00`) instead of the default UTC. Applied to
+/// both the stdout and file logging layers.
+struct LocalTimer;
+
+impl tracing_subscriber::fmt::time::FormatTime for LocalTimer {
+    fn format_time(
+        &self,
+        w: &mut tracing_subscriber::fmt::format::Writer<'_>,
+    ) -> std::fmt::Result {
+        // %Y-%m-%dT%H:%M:%S%.3f%:z  =>  2026-06-20T17:44:00.123+08:00
+        // %:z prints the offset as +HH:MM (colon-separated).
+        write!(w, "{}", Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+    }
 }
 
 /// Delete log files in `dir` whose modification time is older than
@@ -316,10 +343,10 @@ struct RollingWriterInner {
 impl RollingWriterInner {
     /// Check whether rotation is needed and perform it if so. Called after
     /// each write. Rotation triggers when:
-    /// - the date has changed (daily rotation), or
+    /// - the date has changed (daily rotation, local timezone), or
     /// - max_bytes > 0 and the current file exceeds it (size rotation).
     fn maybe_rotate(&mut self) {
-        let today = today_utc();
+        let today = today_local();
         if today != self.current_date {
             self.current_date = today;
             self.seq = 0;
@@ -345,7 +372,7 @@ impl RollingWriterInner {
 impl RollingWriter {
     fn new(dir: PathBuf, max_size_mb: u64, retention_days: u64) -> Self {
         let max_bytes = max_size_mb.saturating_mul(1024 * 1024);
-        let date = today_utc();
+        let date = today_local();
         let seq = highest_seq_for_date(&dir, &date);
         let path = log_path(&dir, &date, seq);
         let file = open_log_file(&path);
@@ -364,30 +391,11 @@ impl RollingWriter {
     }
 }
 
-/// Today's date in UTC as "YYYY-MM-DD".
-fn today_utc() -> String {
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    secs_to_date(secs)
-}
-
-/// Convert Unix seconds to a "YYYY-MM-DD" UTC date string (no chrono dep).
-fn secs_to_date(secs: u64) -> String {
-    let days = (secs / 86400) as i64;
-    // Civil-from-days algorithm (Howard Hinnant). Day 0 = 1970-01-01.
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+/// Today's date in the system's local timezone as "YYYY-MM-DD". Uses the local
+/// date so that daily log rotation aligns with the operator's wall clock
+/// (midnight flips at local midnight, not UTC midnight).
+fn today_local() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
 }
 
 /// Build the log file path for a given date and sequence.
