@@ -65,6 +65,11 @@ pub fn run_update(check: bool, force: bool, restart: bool) -> Result<()> {
     println!("optical — self-update");
     println!("  current version: v{current}");
 
+    // Inform the user if a proxy was detected from the environment.
+    if let Some(proxy) = ureq::Proxy::try_from_env() {
+        println!("  using proxy: {}", proxy.uri());
+    }
+
     // Fetch the latest release info from GitHub.
     let release = fetch_latest_release()?;
     let latest_tag = &release.tag_name;
@@ -182,12 +187,21 @@ pub fn run_update(check: bool, force: bool, restart: bool) -> Result<()> {
 }
 
 /// Build a ureq agent with the configured global timeout.
+///
+/// Proxy support: reads the standard `HTTPS_PROXY`/`https_proxy`/
+/// `HTTP_PROXY`/`http_proxy`/`ALL_PROXY`/`all_proxy` environment variables
+/// (via `ureq::Proxy::try_from_env()`). The `NO_PROXY`/`no_proxy` variable
+/// is also honored to bypass the proxy for specific hosts. If no proxy
+/// environment variable is set, the agent connects directly.
 fn build_agent() -> ureq::Agent {
-    ureq::Agent::new_with_config(
-        ureq::config::Config::builder()
-            .timeout_global(Some(REQUEST_TIMEOUT))
-            .build(),
-    )
+    let mut builder = ureq::config::Config::builder()
+        .timeout_global(Some(REQUEST_TIMEOUT));
+
+    if let Some(proxy) = ureq::Proxy::try_from_env() {
+        builder = builder.proxy(Some(proxy));
+    }
+
+    ureq::Agent::new_with_config(builder.build())
 }
 
 /// Query the GitHub Releases API for the latest release.

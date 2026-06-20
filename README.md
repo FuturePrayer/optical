@@ -310,6 +310,31 @@ optical update --force
 optical update --restart
 ```
 
+### 网络代理
+
+`optical update` 支持通过环境变量配置 HTTP/HTTPS 代理,适用于无法直连 GitHub 的环境:
+
+```bash
+# Linux/macOS
+export HTTPS_PROXY=http://proxy.example.com:8080
+optical update
+
+# Windows PowerShell
+$env:HTTPS_PROXY="http://proxy.example.com:8080"
+optical update
+```
+
+支持的环境变量(按优先级顺序读取,先找到的生效):
+
+| 环境变量 | 说明 |
+|----------|------|
+| `ALL_PROXY` / `all_proxy` | 所有协议的代理 |
+| `HTTPS_PROXY` / `https_proxy` | HTTPS 请求代理 |
+| `HTTP_PROXY` / `http_proxy` | HTTP 请求代理 |
+| `NO_PROXY` / `no_proxy` | 不走代理的主机列表(逗号分隔,支持通配符) |
+
+检测到代理时,`optical update` 会输出 `using proxy: <代理地址>` 提示。
+
 ### 工作原理
 
 1. 查询 GitHub Releases API 获取最新版本号,与编译期嵌入的当前版本做语义化版本比较
