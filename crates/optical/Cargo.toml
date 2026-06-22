@@ -1,0 +1,23 @@
+[package]
+name = "optical"
+version = "0.2.0"
+edition = "2024"
+description = "Post-quantum encrypted tunnel forwarding tool (ML-KEM + ML-DSA + PSK)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "optical"
+path = "src/main.rs"
+
+[dependencies]
+optical-core = { path = "../optical-core", version = "0.2.0", default-features = true }
+# default-features = true → includes "node", excludes "center".
+# The optical node binary contains no config-center server code.
+
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+tokio-util = { version = "0.7", features = ["codec"] }

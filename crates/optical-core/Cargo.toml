@@ -1,0 +1,83 @@
+[package]
+name = "optical-core"
+version = "0.2.0"
+edition = "2024"
+description = "Shared core library for optical (post-quantum encrypted tunnel) and optical-center"
+license = "Apache-2.0"
+
+[lib]
+name = "optical_core"
+path = "src/lib.rs"
+
+[features]
+default = ["node"]
+# Node functionality: forwarders, tunnel server/client, dial, admin API.
+# Enabled by default so the `optical` binary gets the full node feature set.
+node = []
+# Config center server functionality: center server, web UI embedding,
+# REST/SSE admin API. The node-side CenterClient is always compiled (so
+# `optical` can connect to a center); only the server side is gated here.
+center = [
+    "dep:rust-embed",
+    "dep:mime_guess",
+]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Post-quantum cryptography (pure Rust, RustCrypto)
+ml-kem = { version = "0.3", features = ["getrandom"] }
+ml-dsa = "0.1"
+getrandom = "0.4"
+
+# Symmetric crypto
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+bytes = "1"
+hex = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+# Local timezone for log timestamps and daily-rotation date.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Self-update: lightweight HTTP client (rustls TLS) + semantic versioning
+ureq = { version = "3", features = ["rustls"] }
+semver = "1"
+
+# Misc
+futures = "0.3"
+zeroize = { version = "1", features = ["derive"] }
+# Random jitter for config-center reconnect backoff (small, no getrandom needed).
+rand = "0.8"
+
+# Transports: KCP (reliable low-latency UDP) and WebSocket (HTTP proxy / firewall traversal)
+tokio_kcp = "0.9"
+tokio-tungstenite = "0.29"
+
+# Socket option tuning (SO_RCVBUF/SO_SNDBUF/SO_KEEPALIVE) for the tunnel's
+# single multiplexed TCP connection — critical for high-BDP cross-region links.
+socket2 = "0.5"
+
+# Web UI embedding (center feature only)
+rust-embed = { version = "8", optional = true, features = ["compression"] }
+mime_guess = { version = "2", optional = true }
+
+# Platform-specific: Windows Service Control Manager integration
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"

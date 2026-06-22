@@ -1,4 +1,20 @@
 /target
 .codebuddy/
+.idea/
+
+# Keys (never commit private keys)
 keys/*.key
 keys/*.pub
+
+# Frontend build artifacts and dependencies (webui/dist is embedded at compile time)
+webui/node_modules/
+webui/dist/
+
+# Test deployment package (contains test keys + binaries, not for distribution)
+test-deploy/
+
+# Playwright CLI session artifacts
+.playwright-cli/
+
+# Misc local screenshots
+overview-page.png

@@ -1,13 +1,21 @@
 # Build and publish optical releases to GitHub Releases.
 #
 # Triggered by pushing a tag matching `v*` (e.g. `v0.2.0`).
-# Builds the `release-perf` profile (fat LTO + codegen-units=1) for both
-# Windows and Linux x86_64, renames the binary to the asset naming convention
-# expected by `optical update`, and uploads it to a GitHub Release.
+# Builds BOTH binaries for each platform:
+#   - optical         (node binary, no center feature)
+#   - optical-center  (config center + node, with embedded web UI)
 #
-# The asset names MUST match the `ASSET_NAME` constant in `src/updater.rs`:
-#   Windows: optical-x86_64-pc-windows-msvc.exe
-#   Linux:   optical-x86_64-unknown-linux-musl (fully static, no glibc dependency)
+# Both use the `release-perf` profile (fat LTO + codegen-units=1).
+# Asset names MUST match `asset_name_for()` in crates/optical-core/src/updater.rs:
+#   Windows: optical-x86_64-pc-windows-msvc.exe / optical-center-x86_64-pc-windows-msvc.exe
+#   Linux:   optical-x86_64-unknown-linux-musl / optical-center-x86_64-unknown-linux-musl
+#           (fully static, no glibc dependency)
+#
+# A SHA256 checksum is published alongside each binary; the in-process updater
+# refuses to install a binary that fails integrity verification.
+#
+# Node.js is required to build the optical-center web UI (build.rs runs
+# `npm install && npm run build`); the setup-node action provides it.
 
 name: release
 
@@ -22,18 +30,32 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.os }}
+    name: Build ${{ matrix.bin }} (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Node binary — Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            bin: optical
             asset_name: optical-x86_64-pc-windows-msvc.exe
+          # Node binary — Linux (musl, fully static)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            bin: optical
             asset_name: optical-x86_64-unknown-linux-musl
+          # Center binary — Windows (needs Node for web UI build)
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: optical-center
+            asset_name: optical-center-x86_64-pc-windows-msvc.exe
+          # Center binary — Linux (musl, needs Node for web UI build)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            bin: optical-center
+            asset_name: optical-center-x86_64-unknown-linux-musl
 
     steps:
       - name: Checkout
@@ -48,20 +70,26 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      - name: Setup Node.js (for optical-center web UI build)
+        if: matrix.bin == 'optical-center'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Build (release-perf profile)
-        run: cargo build --profile release-perf --target ${{ matrix.target }}
+        run: cargo build --profile release-perf --target ${{ matrix.target }} -p ${{ matrix.bin }}
 
       - name: Rename binary to asset name (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Copy-Item "target/${{ matrix.target }}/release-perf/optical.exe" `
+          Copy-Item "target/${{ matrix.target }}/release-perf/${{ matrix.bin }}.exe" `
                     "${{ matrix.asset_name }}" -Force
 
       - name: Rename binary to asset name (Linux)
         if: runner.os == 'Linux'
         run: |
-          cp "target/${{ matrix.target }}/release-perf/optical" "${{ matrix.asset_name }}"
+          cp "target/${{ matrix.target }}/release-perf/${{ matrix.bin }}" "${{ matrix.asset_name }}"
           chmod +x "${{ matrix.asset_name }}"
 
       - name: Generate SHA256 checksum

@@ -1,73 +1,21 @@
-[package]
-name = "optical"
-version = "0.1.4"
-edition = "2024"
-description = "Post-quantum encrypted tunnel forwarding tool (ML-KEM + ML-DSA + PSK)"
-license = "Apache-2.0"
+# Workspace root. Members are defined in each crate's Cargo.toml.
+# This file declares the workspace, the shared release profile, and the
+# member crates. Individual dependency versions live in each member's
+# Cargo.toml.
 
-[dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+[workspace]
+members = [
+    "crates/optical-core",
+    "crates/optical",
+    "crates/optical-center",
+]
+resolver = "3"
 
-# Post-quantum cryptography (pure Rust, RustCrypto)
-ml-kem = { version = "0.3", features = ["getrandom"] }
-ml-dsa = "0.1"
-getrandom = "0.4"
-
-# Symmetric crypto
-chacha20poly1305 = "0.10"
-sha2 = "0.10"
-hkdf = "0.12"
-hmac = "0.12"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
-serde_json = "1"
-bytes = "1"
-hex = "0.4"
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
-# Local timezone for log timestamps and daily-rotation date (avoids hand-rolled
-# cross-platform TZ-offset arithmetic, which is error-prone). `clock` feature
-# provides `chrono::Local::now()`; std-only, no wasm-bindgen.
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-
-# Error handling
-anyhow = "1"
-thiserror = "2"
-
-# Self-update: lightweight HTTP client (rustls TLS) + semantic versioning
-ureq = { version = "3", features = ["rustls"] }
-semver = "1"
-
-# Misc
-futures = "0.3"
-zeroize = { version = "1", features = ["derive"] }
-
-# Transports: KCP (reliable low-latency UDP) and WebSocket (HTTP proxy / firewall traversal)
-tokio_kcp = "0.9"
-tokio-tungstenite = "0.29"
-
-# Socket option tuning (SO_RCVBUF/SO_SNDBUF/SO_KEEPALIVE) for the tunnel's
-# single multiplexed TCP connection — critical for high-BDP cross-region links.
-socket2 = "0.5"
-
-# Platform-specific: Windows Service Control Manager integration
-[target.'cfg(windows)'.dependencies]
-windows-service = "0.8"
-
-# Optimized profile used for Release distribution (GitHub Actions).
-# Fat LTO + single codegen unit: maximizes cross-crate inlining (beneficial for
-# the crypto-heavy workload: ML-KEM/ML-DSA/ChaCha20-Poly1305) and reduces binary
-# size, at the cost of ~5-10x longer compile time. Local dev uses debug/release.
+# Shared optimized profile used for Release distribution (GitHub Actions).
+# Fat LTO + single codegen unit: maximizes cross-crate inlining (beneficial
+# for the crypto-heavy workload: ML-KEM/ML-DSA/ChaCha20-Poly1305) and reduces
+# binary size, at the cost of ~5-10x longer compile time. Local dev uses
+# debug/release.
 [profile.release-perf]
 inherits = "release"
 lto = "fat"

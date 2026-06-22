@@ -36,51 +36,65 @@
 
 ## 代码结构
 
+项目是 **Cargo workspace**,由一个共享核心库 + 两个二进制组成:
+
 ```
-src/
-├── main.rs              # CLI 入口(clap 子命令分发)
-├── app.rs               # 应用编排:加载配置、启动隧道服务+转发器+管理API、优雅关闭
-├── config.rs            # YAML 配置解析与校验
-├── error.rs             # 统一错误类型(thiserror)
-├── service/             # 系统服务管理(install/uninstall/start/stop/restart)
-│   ├── mod.rs           #   跨平台 trait + 信号处理
-│   ├── linux.rs         #   systemd 实现
-│   └── windows.rs       #   SCM (windows-service) 实现
-├── crypto/              # 密码学模块
-│   ├── mod.rs           #   模块导出
-│   ├── kdf.rs           #   HKDF 密钥派生、PSK 生成
-│   ├── pqkem.rs         #   ML-KEM-768 密钥封装
-│   ├── pqdsa.rs         #   ML-DSA-65 签名、密钥文件 I/O
-│   ├── aead.rs          #   ChaCha20-Poly1305 AEAD 加解密
-│   └── handshake.rs     #   PQ 握手协议(ClientHello/ServerHello/Finished)
-├── transport/           # 传输层抽象
-│   ├── mod.rs           #   Connect/Listen trait + Duplex 类型别名 + AnyTransport 调度器(按 URL scheme/listen_kind 分发)
-│   ├── tcp.rs           #   TCP 传输实现
-│   ├── kcp.rs           #   KCP 传输实现(tokio-kcp,KcpStream 已实现 AsyncRead/Write)
-│   └── ws.rs            #   WebSocket 传输(tokio-tungstenite)+ WsDuplex 适配层(Stream/Sink→AsyncRead/Write)+ 200 伪装响应
-├── proto/               # 隧道协议
-│   ├── frame.rs         #   帧类型定义与编解码(15B header + AEAD payload)
-│   └── stream.rs        #   多路复用流句柄、双向复制
-├── tunnel/              # 隧道核心
-│   ├── mod.rs           #   Tunnel 结构:reader/writer/heartbeat 三个 task
-│   ├── client.rs        #   隧道客户端:握手 + 指数退避重连
-│   └── server.rs        #   隧道服务端:接受连接 + 握手
-├── forward/             # 前向转发(Node1)
-│   ├── mod.rs           #   按隧道地址分组、启动转发器、分离 reverse 项
-│   ├── tcp.rs           #   TCP 转发器(含 forward_via_tunnel 可复用核心)
-│   ├── udp.rs           #   UDP 转发器(含 udp_session_with_tunnel 可复用核心)
-│   └── reverse.rs       #   反向隧道:RegisterReverse 注册/监听/冲突检测
-├── dial/                # 拨号(Node2)
-│   ├── mod.rs           #   处理入站 OPEN 请求
-│   ├── tcp.rs           #   TCP 拨号
-│   └── udp.rs           #   UDP 拨号
-├── metrics/             # 指标采集(可观测性)
-│   ├── mod.rs           #   MetricsRegistry(全局 OnceLock)、TunnelMetrics、ForwarderMetrics
-│   └── history.rs       #   环形缓冲时间序列(10s 采样,60min 保留)
-├── paths.rs             # 平台默认路径(system/user scope)、配置模板渲染、私钥权限加固
-└── admin/               # 管理 API(可观测性)
-    └── mod.rs           #   本地 HTTP-JSON 服务 + TunnelRegistry
+optical/                          # workspace 根
+├── Cargo.toml                    # [workspace] 成员声明 + 共享 profile.release-perf
+├── config.example.yml            # 配置模板(编译期 include_str! 进 paths.rs)
+├── crates/
+│   ├── optical-core/             # 共享核心库(lib crate)
+│   │   ├── Cargo.toml            #   features: node(默认) / center
+│   │   └── src/
+│   │       ├── lib.rs            #   模块导出
+│   │       ├── app.rs            #   应用编排:加载配置、启动各角色、优雅关闭
+│   │       ├── config.rs         #   YAML 配置解析与校验(含 center 块)
+│   │       ├── config_manager.rs #   配置热更新(center 下发 → diff → 启停 forwarder)
+│   │       ├── cli.rs            #   CLI 子命令实现(两 bin 共用)
+│   │       ├── error.rs          #   统一错误类型(thiserror)
+│   │       ├── paths.rs          #   AppKind(Node/Center)、平台默认路径、模板渲染、私钥权限
+│   │       ├── updater.rs        #   自更新(按 AppKind 选 asset 名)
+│   │       ├── crypto/           #   密码学: kdf/pqkem/pqdsa/aead/handshake
+│   │       ├── transport/        #   传输层: tcp/kcp/ws + AnyTransport
+│   │       ├── proto/            #   隧道协议: frame(含 center 帧类型) + stream
+│   │       ├── tunnel/           #   隧道核心: mod/client/server
+│   │       ├── forward/          #   前向转发: mod/tcp/udp/reverse
+│   │       ├── dial/             #   拨号: tcp/udp
+│   │       ├── metrics/          #   指标: mod + history
+│   │       ├── service/          #   系统服务: linux/windows(服务名按 AppKind)
+│   │       ├── admin/            #   节点 admin API(status/ping/bench)
+│   │       ├── center/           #   配置中心
+│   │       │   ├── proto.rs      #     center 应用帧编解码(JSON over AEAD)
+│   │       │   ├── client.rs     #     CenterClient(节点侧,始终编译)
+│   │       │   ├── events.rs     #     EventHub(SSE 广播)
+│   │       │   ├── state.rs      #     全局 CenterState(OnceLock)
+│   │       │   ├── server.rs     #     #[cfg(center)] center 服务端 + Session
+│   │       │   ├── registry.rs   #     #[cfg(center)] NodeRegistry + 白名单 + nodes.json
+│   │       │   └── web_admin.rs  #     #[cfg(center)] REST/SSE + 嵌入式 web UI 服务
+│   │       └── webui.rs          #   #[cfg(center)] rust-embed 嵌入 webui/dist
+│   ├── optical/                  # 节点二进制(bin)
+│   │   ├── Cargo.toml            #   依赖 optical-core(默认 features=仅 node)
+│   │   └── src/main.rs           #   clap 分发(不含 center 子命令)
+│   └── optical-center/           # 配置中心二进制(bin)
+│       ├── Cargo.toml            #   依赖 optical-core(features=node+center)
+│       ├── build.rs              #   编译时触发 npm build 前端
+│       └── src/main.rs           #   clap 分发(节点命令 + center run/init)
+└── webui/                        # React 前端(Vite + Ant Design + TanStack Query)
+    ├── package.json
+    ├── dist/                     # 构建产物(被 optical-center 编译期嵌入)
+    └── src/                      #   api/ pages/ + App.tsx
 ```
+
+### 双二进制与 Feature 门控
+
+| 二进制 | optical-core features | 含 center 服务端代码 | 含前端嵌入 | 编译需 Node.js |
+|--------|----------------------|---------------------|-----------|---------------|
+| `optical`(节点) | `node`(默认) | ❌ | ❌ | ❌ |
+| `optical-center`(中心) | `node` + `center` | ✅ | ✅ rust-embed | ✅ build.rs 调 npm |
+
+- 节点二进制 `optical` **始终内置 CenterClient**(`center/client.rs` 不受 feature 门控),所以节点能被中心纳管,但自身不做中心服务端
+- 中心二进制 `optical-center` 双重身份:既是中心服务端,也可同时承担节点角色(转发/隧道)
+- `center` feature 门控的代码在节点二进制中**完全不编译进产物**
 
 ## 核心设计
 
@@ -92,7 +106,11 @@ src/
 [4B stream_id][8B counter][1B frame_type][2B payload_len][payload (AEAD ciphertext + 16B tag)]
 ```
 
-帧类型:`Open(0x01)` `OpenAck(0x02)` `Data(0x03)` `Close(0x04)` `Ping(0x05)` `Pong(0x06)` `Echo(0x07)` `EchoReply(0x08)` `RegisterReverse(0x09)` `RegisterReverseAck(0x0A)`
+帧类型:`Open(0x01)` `OpenAck(0x02)` `Data(0x03)` `Close(0x04)` `Ping(0x05)` `Pong(0x06)` `Echo(0x07)` `EchoReply(0x08)` `RegisterReverse(0x09)` `RegisterReverseAck(0x0A)` `NodeRegister(0x0B)` `ConfigPush(0x0C)` `StatusReport(0x0D)` `ConfigAck(0x0E)`
+
+- `0x01-0x0A`:隧道多路复用帧(在 `Tunnel` 连接上传输)
+- `0x0B-0x0E`:配置中心应用帧(仅在 center 会话连接上传输,`stream_id=0`,JSON payload)。隧道 `reader_task` 收到这些帧会静默忽略(防御性)
+- `parse_header` 返回原始 `u8` 而非 `FrameType`,调用方负责转换;未知帧类型**静默跳过**而非断连(前向兼容关键,见"协议兼容性")
 
 - `stream_id=0` 用于控制帧(Ping/Pong/Echo/EchoReply/**RegisterReverse**/**RegisterReverseAck**)
 - 客户端分配偶数 stream_id (0, 2, 4, ...),服务端分配奇数 stream_id (1, 3, 5, ...)——反向隧道模式下两端都会发 OPEN,按角色区分避免冲突
@@ -149,6 +167,42 @@ src/
 
 **进程级退出:** 反向注册失败时,`run_forwarders` 返回 `Err` → `app.rs` 传播错误 → `main()` 以非零码退出。作为服务运行时,Windows SCM 报告 `ServiceExitCode::ServiceSpecific(1)`,systemd 检测到非零退出码。
 
+### 配置中心 (center/ + config_manager.rs)
+
+配置中心是一个集中服务,管理多个节点的 forwarder 配置。由 `optical-center` 二进制承载(同时也可做节点),节点用 `optical` 二进制被纳管。
+
+**角色与数据流:**
+```
+浏览器 ──HTTP/REST/SSE──> optical-center (center_admin_listen)
+                                │ /api/config/push (表单提交)
+                                ↓
+                          NodeRegistry.approve() + nodes.json 持久化
+                                ↓
+                          SessionMap.push() → ConfigPush 帧(AEAD 加密)
+                                ↓ (PQ 握手 + 长连接 center_listen)
+                          optical 节点
+                                ↓ CenterClient 收 ConfigPush
+                          ConfigManager.apply() (取消旧 task + 启新 forwarder,热生效)
+                                ↓
+                          forwarder 监听本地端口 → 经隧道转发
+                                ↓ StatusReport (周期上报) → center → 浏览器 SSE 实时刷新
+```
+
+**关键组件:**
+- `center/proto.rs`:center 应用帧编解码。复用隧道 15B header + AEAD 线格式,但 payload 是 JSON 而非多路复用数据。帧类型 `0x0B-0x0E`(NodeRegister/ConfigPush/StatusReport/ConfigAck),`stream_id=0`
+- `center/client.rs`(**始终编译**):节点侧 CenterClient。连中心 → PQ 握手(用 `center.psk`)→ 发 NodeRegister(含 node_id + 版本 + 能力)→ 收 ConfigPush → 回 ConfigAck → 周期 StatusReport。退避带 jitter(避免惊群)。节点 config.yml 有 `center:` 块即启用
+- `center/server.rs`(**#[cfg(center)]**):中心服务端。accept → `server_handshake` → 每节点一个 Session(读帧 + 推送通道)。`HandshakeResult.peer_node_id` 从握手的 dsa_pubkey 派生(SHA-256),作为节点身份
+- `center/registry.rs`(**#[cfg(center)]**):NodeRegistry(node_id → 记录)。白名单自动批准:在 nodes.json 中的节点连上即放行 + 立即下发已分配配置;未知节点进 Pending。`approve()` bump config_version + 持久化 + 触发推送
+- `center/events.rs`:EventHub(broadcast)。节点注册/离线/状态/推送时广播给 SSE 订阅者
+- `center/state.rs`:全局 CenterState(OnceLock,registry + sessions + hub),供 web admin 访问
+- `center/web_admin.rs`(**#[cfg(center)]**):REST API(`/api/overview`/`/api/nodes`/`/api/pending`/`/api/nodes/:id/approve`/`/api/config/push`/`/api/whitelist`)+ SSE(`/api/events`)+ 嵌入式 web UI 静态资源服务。Bearer token 认证(`center_admin_token`)
+- `config_manager.rs`:配置热更新。收到 ConfigPush → 取消旧 forwarder task → 启动新 set → 更新版本号。full-restart 策略(非细粒度 diff),复用 `forward::run_forwarders`
+- `webui.rs`(**#[cfg(center)]**):rust-embed 编译期嵌入 `webui/dist/`。SPA fallback 到 index.html
+
+**节点身份:** `node_id = SHA-256(ML-DSA-65 verifying key)`,hex 64 字符(`pqdsa::fingerprint_vk`)。节点的永久身份,与私钥一一对应。`HandshakeResult.peer_node_id` 在握手完成后从对端公钥派生——节点注册是握手的副产品,无需额外鉴权层。
+
+**配置热更新:** ConfigManager 收到新 ConfigPush 时,取消当前 forwarder set 的 CancellationToken + 等待 drain(30s 超时)→ 用新 forwarders 调 `run_forwarders`。在用连接会被中断(MVP 策略;后续可演进到细粒度 diff 只重启变化的 forwarder)。
+
 ### 可观测性架构
 
 - **全局 `MetricsRegistry`**(`OnceLock`):避免在所有函数签名中传递 `Arc`
@@ -195,7 +249,7 @@ src/
 4. 如需客户端侧响应,在 `TunnelInner` 添加等待通道(参考 `ping_waiter`/`echo_reply_tx`/`register_ack_waiter`)
 5. 如需服务端侧处理,在 `Tunnel::new` 创建 mpsc channel 并由 `reader_task` 投递(参考 `open_tx`/`reverse_tx`),消费端在 `tunnel/server.rs` 中 spawn
 
-> **兼容性注意**:自 v0.1.0 起存在存量用户。新增帧类型时,旧版本节点的 `parse_header` 遇到未知帧类型会返回 `Err` 并断开隧道。引入新帧类型前,应先发布能静默跳过未知帧类型的容错版本(修改 `parse_header` 行为),或通过握手版本协商规避。详见上文"协议兼容性"章节。
+> **兼容性注意**:自 v0.1.0 起存在存量用户。`parse_header` 现在返回原始 `u8`,调用方对未知帧类型**静默跳过**(`continue`)而非断连——这意味着新增帧类型(如 `0x0B-0x0E` 的 center 帧)不会破坏旧版本的隧道连接。但旧版本(此容错改动之前)遇到未知帧仍会断连,因此破坏性协议变更仍需走版本协商。详见上文"协议兼容性"章节。
 
 ### 新增 CLI 子命令
 
@@ -222,7 +276,7 @@ src/
 **帧协议兼容性约束:**
 
 - 帧类型字段为 1 字节,当前已用 `0x01`-`0x0A`(`Open` 至 `RegisterReverseAck`)
-- `parse_header` 对未知帧类型返回 `Err`(**非静默跳过**)— 这是一个关键兼容性风险点:新版本引入新帧类型后,旧版本节点遇到该帧会报错并断开整条隧道。引入新帧类型前,应先发布一个能"静默跳过未知帧类型"的容错版本,等待足够比例的用户升级后再发布实际使用新帧类型的版本;或通过握手阶段的版本协商机制规避
+- `parse_header` 对未知帧类型返回原始 `u8`,调用方(`reader_task`)静默 `continue` 跳过(**已实现容错**)。新增帧类型不再需要两步发布,但仍建议破坏性协议变更走版本协商
 - 帧头结构(15B: `[4B stream_id][8B counter][1B frame_type][2B payload_len]`)变更属破坏性改动,会阻断新旧端互通
 
 **握手协议兼容性约束:**
@@ -266,32 +320,47 @@ src/
 
 ## 构建与验证
 
-```bash
-# 快速检查(不生成二进制)
-cargo check
+workspace 模式下,用 `-p <crate>` 指定构建哪个二进制;不加 `-p` 则全量构建。
 
-# Debug 构建
+```bash
+# 快速检查(不生成二进制,检查整个 workspace)
+cargo check --workspace
+
+# 构建(整个 workspace: optical-core + optical + optical-center)
 cargo build
 
-# Release 构建
-cargo build --release
+# 只构建节点二进制(轻量,不需要 Node.js)
+cargo build -p optical
+
+# 只构建配置中心二进制(会自动触发 npm install + npm run build 前端)
+cargo build -p optical-center
+
+# Release-perf 构建(fat LTO,用于发布;编译慢)
+cargo build --profile release-perf -p optical
+cargo build --profile release-perf -p optical-center
+
+# 跳过前端构建(纯 Rust 改动时加速,用上次构建的 dist)
+OPTICAL_SKIP_WEBUI=1 cargo build -p optical-center
 
 # 运行测试
-cargo test
+cargo test --workspace
 
 # 生成开发用密钥
-cargo run -- keygen --private-key ./keys/dev.key --public-key ./keys/dev.pub
-cargo run -- psk-gen
+cargo run -p optical -- keygen --private-key ./keys/dev.key --public-key ./keys/dev.pub
+cargo run -p optical -- psk-gen
 
 # 一键初始化节点(生成密钥 + PSK + 配置文件,默认 user scope)
-cargo run -- init
-cargo run -- init --system          # 系统级路径(需 root/管理员)
-cargo run -- init --config-dir ./my-node   # 自定义目录
-cargo run -- init --force           # 覆盖已存在的文件
+cargo run -p optical -- init
+cargo run -p optical -- init --system          # 系统级路径(需 root/管理员)
+cargo run -p optical -- init --config-dir ./my-node   # 自定义目录
+cargo run -p optical -- init --force           # 覆盖已存在的文件
+
+# 一键初始化配置中心(生成密钥 + PSK + 空 nodes.json + 中心配置模板)
+cargo run -p optical-center -- init
 
 # 前台运行(编辑 config.example.yml 后)
-cargo run -- run --config config.example.yml
+cargo run -p optical -- run --config config.example.yml
 
 # 日志级别控制
-RUST_LOG=debug cargo run -- run --config config.example.yml
+RUST_LOG=debug cargo run -p optical -- run --config config.example.yml
 ```

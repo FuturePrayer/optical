@@ -1,0 +1,27 @@
+[package]
+name = "optical-center"
+version = "0.2.0"
+edition = "2024"
+description = "optical config center — central management server with embedded web UI"
+license = "Apache-2.0"
+build = "build.rs"
+
+[[bin]]
+name = "optical-center"
+path = "src/main.rs"
+
+[dependencies]
+optical-core = { path = "../optical-core", version = "0.2.0", features = ["node", "center"] }
+# Both "node" (dual-role: center also does forwarding/tunnel) and "center"
+# (server + web UI) features enabled.
+
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[build-dependencies]
+# build.rs uses std only (npm invocation); no extra build-dependency needed.

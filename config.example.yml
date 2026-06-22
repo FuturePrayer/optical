@@ -130,3 +130,28 @@ tunnel:
 # Local HTTP endpoint for `optical status`, `optical ping`, `optical bench`.
 # Omit or set to null to disable.
 admin_listen: "127.0.0.1:9100"
+
+# ── Config center client (optical node only) ────────────────────────────────
+# When this block is present, the node connects to a config center, registers
+# its identity (derived from the ML-DSA public key), and receives `forwarders`
+# via encrypted ConfigPush frames — hot-applied without restarting. Status is
+# reported periodically. When omitted, the node runs standalone using the
+# `forwarders` / `tunnel_listen` defined above.
+#
+# When `center` is set, local `forwarders` are ignored (the center is the
+# source of truth). `tunnel_listen` (Node2 role) can still be set locally.
+#
+# center:
+#   address: "tcp://center.example.com:7000"   # center server (tcp/kcp/ws scheme)
+#   psk: "hex:..."                             # center trust-domain PSK (may differ from `psk`)
+#   status_report_interval_secs: 15            # how often to report status to the center
+
+# ── Config center server (optical-center binary only) ───────────────────────
+# These fields configure the config-center *server* role. They are ignored by
+# the plain `optical` node binary (which has no center feature compiled in).
+#
+# center_listen: "0.0.0.0:7000"            # listen for node connections (PQ handshake)
+# center_psk: "hex:..."                    # center trust-domain PSK (must match nodes' center.psk)
+# center_admin_listen: "127.0.0.1:9100"    # web UI + REST/SSE API (browser opens this)
+# center_admin_token: "your-secret-token"  # required for /api/* access; omit for no-auth (local only)
+# center_data_dir: "/var/lib/optical-center"  # where nodes.json (whitelist + assigned configs) is stored
