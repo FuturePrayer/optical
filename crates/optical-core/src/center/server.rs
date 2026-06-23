@@ -174,7 +174,12 @@ async fn run_session(
 
     let mut read_half = read_half;
     let mut last_heartbeat = tokio::time::Instant::now();
-    let heartbeat_check = Duration::from_secs(60);
+    // Drop a session if no frame (ping/pong/status/any) arrives within this
+    // window. Tuned to 90s = 6× the default 15s status interval, so a node
+    // missing a few reports (network jitter) is tolerated.
+    let heartbeat_check = Duration::from_secs(90);
+    let mut heartbeat_timer = tokio::time::interval(heartbeat_check);
+    heartbeat_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let pending_push = push_rx.recv();
@@ -183,9 +188,23 @@ async fn run_session(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
+            // Active heartbeat timer: even if the node goes fully silent (no
+            // frames at all), this fires and lets us detect the timeout.
+            _ = heartbeat_timer.tick() => {
+                if last_heartbeat.elapsed() > heartbeat_check {
+                    tracing::warn!("center session {} heartbeat timeout ({}s), dropping",
+                        peer_node_id, last_heartbeat.elapsed().as_secs());
+                    break;
+                }
+            }
             res = proto::read_frame(&mut read_half, &recv_cipher) => {
                 match res {
                     Ok(Some((ft, plaintext))) => {
+                        // Any valid frame is proof of liveness — update the
+                        // heartbeat timestamp for ALL frame types (not just
+                        // Ping/Pong), since nodes send StatusReport every ~15s
+                        // as their keepalive.
+                        last_heartbeat = tokio::time::Instant::now();
                         match ft {
                             FrameType::NodeRegister => {
                                 let msg: NodeRegisterMsg = match serde_json::from_slice(&plaintext) {
@@ -258,10 +277,10 @@ async fn run_session(
                                     FrameType::Pong, &serde_json::json!({}),
                                 ).await;
                                 send_counter += 1;
-                                last_heartbeat = tokio::time::Instant::now();
                             }
                             FrameType::Pong => {
-                                last_heartbeat = tokio::time::Instant::now();
+                                // Pong is a heartbeat reply; liveness already
+                                // updated at the top of this branch.
                             }
                             _ => {
                                 tracing::trace!(?ft, "ignoring center frame on server");
@@ -290,12 +309,6 @@ async fn run_session(
                     "pushed config to node"
                 );
             }
-        }
-
-        // Liveness: if no frame (incl. pong) for a long time, drop the session.
-        if last_heartbeat.elapsed() > heartbeat_check {
-            tracing::warn!("center session {} heartbeat timeout, dropping", peer_node_id);
-            break;
         }
     }
 

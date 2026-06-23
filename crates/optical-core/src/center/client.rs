@@ -165,10 +165,17 @@ async fn run_one_session(
 
     let report_interval = Duration::from_secs(config.status_report_interval_secs);
     let mut last_status = tokio::time::Instant::now();
+    // Periodic ping to keep the center's heartbeat timer fed. The center drops
+    // sessions that go silent for ~90s; we ping every 20s (well within that
+    // window) as an explicit liveness probe independent of StatusReport cadence.
+    let ping_interval = Duration::from_secs(20);
+    let mut last_ping = tokio::time::Instant::now();
 
     loop {
         let next_status = tokio::time::sleep_until(last_status + report_interval);
         tokio::pin!(next_status);
+        let next_ping = tokio::time::sleep_until(last_ping + ping_interval);
+        tokio::pin!(next_ping);
 
         tokio::select! {
             biased;
@@ -192,6 +199,17 @@ async fn run_one_session(
                         return Err(e.into());
                     }
                 }
+            }
+            _ = &mut next_ping => {
+                if let Err(e) = proto::write_frame(
+                    &mut write_half, &send_cipher, send_counter,
+                    FrameType::Ping, &serde_json::json!({}),
+                ).await {
+                    tracing::debug!("ping send failed: {e}");
+                    return Err(e.into());
+                }
+                send_counter += 1;
+                last_ping = tokio::time::Instant::now();
             }
             _ = &mut next_status => {
                 let snapshot = metrics::try_get()
