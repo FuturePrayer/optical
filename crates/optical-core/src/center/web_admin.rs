@@ -91,12 +91,18 @@ async fn handle_connection(
         if n == 0 || header.trim().is_empty() {
             break;
         }
-        let lower = header.to_lowercase();
-        if let Some(val) = lower.strip_prefix("authorization:") {
-            auth_header = Some(val.trim().to_string());
-        }
-        if let Some(val) = lower.strip_prefix("content-length:") {
-            content_length = val.trim().parse().unwrap_or(0);
+        // Split on the first ':' so we can match the header NAME
+        // case-insensitively WITHOUT lowercasing the VALUE. Lowercasing the
+        // whole line would corrupt the Bearer token when it contains uppercase
+        // letters (e.g. "CHANGE_ME" → "change_me"), causing a 401 mismatch.
+        if let Some((name, value)) = header.split_once(':') {
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim();
+            if name == "authorization" {
+                auth_header = Some(value.to_string());
+            } else if name == "content-length" {
+                content_length = value.parse().unwrap_or(0);
+            }
         }
     }
 
@@ -118,12 +124,21 @@ async fn handle_connection(
     if path_only.starts_with("/api/") {
         // Auth: require Bearer token (header) or ?token= (query) if configured.
         if let Some(expected) = &admin_token {
-            // Bearer prefix is case-insensitive (curl sends "Bearer", some
-            // clients send "bearer"). auth_header was lowercased on read.
+            // Strip the "Bearer " / "bearer " prefix case-insensitively (HTTP
+            // allows either). The token VALUE is kept at its original case —
+            // the comparison against `expected` is case-sensitive.
             let provided: Option<String> = auth_header
                 .as_deref()
-                .and_then(|h| h.strip_prefix("bearer "))
-                .map(|s| s.to_string())
+                .and_then(|h| {
+                    // "Bearer " / "bearer " is 7 chars. Compare the prefix
+                    // case-insensitively, then slice the original string so
+                    // the token keeps its original case.
+                    if h.len() >= 7 && h[..7].eq_ignore_ascii_case("bearer ") {
+                        Some(h[7..].trim().to_string())
+                    } else {
+                        None
+                    }
+                })
                 .or_else(|| token_param.map(|s| s.to_string()));
             if provided.as_deref() != Some(expected.as_str()) {
                 let resp = http_json(401, r#"{"error":"unauthorized"}"#);
