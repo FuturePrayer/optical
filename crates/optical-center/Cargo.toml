@@ -1,6 +1,6 @@
 [package]
 name = "optical-center"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "optical config center — central management server with embedded web UI"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ name = "optical-center"
 path = "src/main.rs"
 
 [dependencies]
-optical-core = { path = "../optical-core", version = "0.2.0", features = ["node", "center"] }
+optical-core = { path = "../optical-core", version = "0.2.1", features = ["node", "center"] }
 # Both "node" (dual-role: center also does forwarding/tunnel) and "center"
 # (server + web UI) features enabled.
 
