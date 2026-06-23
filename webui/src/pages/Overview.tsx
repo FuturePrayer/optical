@@ -45,10 +45,13 @@ export default function Overview() {
         pagination={false}
         columns={[
           {
-            title: 'node_id',
+            title: '节点',
             dataIndex: 'node_id',
-            render: (id: string) => <Link to={`/nodes/${id}`}>{id.slice(0, 12)}…{id.slice(-4)}</Link>,
+            render: (id: string, r: NodeRecord) => (
+              <Link to={`/nodes/${id}`}>{r.name || `${id.slice(0, 12)}…${id.slice(-4)}`}</Link>
+            ),
           },
+          { title: 'IP', render: (_: any, r: NodeRecord) => r.remote_addr || '—' },
           { title: '状态', dataIndex: 'status', render: (s: string) => <Tag color="red">离线</Tag> },
           { title: '版本', dataIndex: 'last_version' },
           { title: '配置版本', dataIndex: 'config_version' },
@@ -63,10 +66,13 @@ export default function Overview() {
         pagination={false}
         columns={[
           {
-            title: 'node_id',
+            title: '节点',
             dataIndex: 'node_id',
-            render: (id: string) => <Link to={`/nodes/${id}`}>{id.slice(0, 12)}…{id.slice(-4)}</Link>,
+            render: (id: string, r: NodeRecord) => (
+              <Link to={`/nodes/${id}`}>{r.name || `${id.slice(0, 12)}…${id.slice(-4)}`}</Link>
+            ),
           },
+          { title: 'IP', render: (_: any, r: NodeRecord) => r.remote_addr || '—' },
           { title: '状态', dataIndex: 'status', render: () => <Tag color="green">在线</Tag> },
           { title: '版本', dataIndex: 'last_version' },
           { title: '配置版本', dataIndex: 'config_version' },

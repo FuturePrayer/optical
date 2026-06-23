@@ -96,7 +96,11 @@ export default function ConfigPush() {
             onChange={setTargetNode}
             options={(nodes || []).map((n) => ({
               value: n.node_id,
-              label: `${n.node_id.slice(0, 12)}…${n.node_id.slice(-4)} ${n.online ? '●' : '○'}`,
+              label: `${
+                n.name
+                  ? `${n.name} (${n.node_id.slice(0, 8)}…)`
+                  : `${n.node_id.slice(0, 12)}…${n.node_id.slice(-4)}`
+              } ${n.online ? '●' : '○'}`,
             }))}
           />
         </Form.Item>

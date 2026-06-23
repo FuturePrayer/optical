@@ -42,9 +42,17 @@ pub struct NodeRecord {
     /// Last reported version string.
     #[serde(default)]
     pub last_version: Option<String>,
+    /// Human-friendly name assigned by the admin (e.g. "edge-tokyo"). Persists
+    /// across restarts. None = unnamed (UI falls back to node_id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Whether the node is currently connected.
     #[serde(skip)]
     pub online: bool,
+    /// The TCP peer address of the center session (set on connect, transient).
+    /// Shows the address the center sees (NAT-dependent).
+    #[serde(skip)]
+    pub remote_addr: Option<String>,
     /// Last seen status report (None until the first report arrives).
     #[serde(skip)]
     pub last_status: Option<StatusReportMsg>,
@@ -113,11 +121,13 @@ impl NodeRegistry {
 
     /// Register or update a node on connect. Returns the (possibly updated)
     /// record and whether the node is approved (auto-approved if in the
-    /// whitelist).
+    /// whitelist). `peer_addr` is the TCP peer address seen by the center
+    /// (NAT-dependent); stored for display in the node list.
     pub fn on_connect(
         &self,
         node_id: &str,
         version: &str,
+        peer_addr: std::net::SocketAddr,
     ) -> (NodeRecord, bool) {
         let mut map = self.inner.lock().unwrap();
         let approved;
@@ -129,7 +139,9 @@ impl NodeRegistry {
                 config_version: 0,
                 forwarders: vec![],
                 last_version: None,
+                name: None,
                 online: true,
+                remote_addr: None,
                 last_status: None,
                 last_seen: None,
             }
@@ -138,6 +150,7 @@ impl NodeRegistry {
         approved = rec.status == NodeStatus::Approved;
         rec.online = true;
         rec.last_version = Some(version.to_string());
+        rec.remote_addr = Some(peer_addr.to_string());
         let snapshot = rec.clone();
         drop(map);
         (snapshot, approved)
@@ -181,7 +194,9 @@ impl NodeRegistry {
                     config_version: 1,
                     forwarders,
                     last_version: None,
+                    name: None,
                     online: false,
+                    remote_addr: None,
                     last_status: None,
                     last_seen: None,
                 },
@@ -200,6 +215,20 @@ impl NodeRegistry {
         }
         drop(map);
         self.save();
+    }
+
+    /// Rename a node (set or clear its display name). Pass `None` to clear.
+    /// Returns false if the node is not in the registry.
+    pub fn rename(&self, node_id: &str, name: Option<String>) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(rec) = map.get_mut(node_id) {
+            rec.name = name;
+            drop(map);
+            self.save();
+            true
+        } else {
+            false
+        }
     }
 
     /// Remove a node entirely (revoke).
@@ -279,9 +308,15 @@ pub struct NodeApiView {
     pub config_version: u64,
     pub forwarders: Vec<crate::config::ForwarderConfig>,
     pub last_version: Option<String>,
+    /// Human-friendly name (None = unnamed; UI shows node_id).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Whether the node is currently connected (transient — accurate at the
     /// moment of the API call).
     pub online: bool,
+    /// TCP peer address seen by the center (NAT-dependent; transient).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_addr: Option<String>,
     /// Last received status report (None until the first StatusReport frame).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_status: Option<crate::center::proto::StatusReportMsg>,
@@ -295,7 +330,9 @@ impl From<&NodeRecord> for NodeApiView {
             config_version: r.config_version,
             forwarders: r.forwarders.clone(),
             last_version: r.last_version.clone(),
+            name: r.name.clone(),
             online: r.online,
+            remote_addr: r.remote_addr.clone(),
             last_status: r.last_status.clone(),
         }
     }

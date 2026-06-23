@@ -112,7 +112,7 @@ pub async fn run(
                             let (read_half, write_half) = tokio::io::split(stream);
                             if let Err(e) = run_session(
                                 read_half, write_half,
-                                handshake, peer_node_id,
+                                handshake, peer_node_id, peer_addr,
                                 registry, sessions, cancel,
                             ).await {
                                 tracing::debug!("center session ended: {e}");
@@ -138,6 +138,7 @@ async fn run_session(
     write_half: tokio::io::WriteHalf<Box<dyn crate::transport::Duplex>>,
     handshake: crate::crypto::handshake::HandshakeResult,
     peer_node_id: String,
+    peer_addr: std::net::SocketAddr,
     registry: Arc<NodeRegistry>,
     sessions: SessionMap,
     cancel: CancellationToken,
@@ -200,7 +201,7 @@ async fn run_session(
                                     "node registered"
                                 );
                                 let (record, approved) =
-                                    registry.on_connect(&msg.node_id, &msg.version);
+                                    registry.on_connect(&msg.node_id, &msg.version, peer_addr);
                                 // Emit events for the admin UI.
                                 if let Some(state) = crate::center::state::try_get() {
                                     let _ = state.hub.broadcast(CenterEvent::NodeRegistered {

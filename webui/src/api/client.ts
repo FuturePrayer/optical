@@ -51,6 +51,11 @@ export const api = {
     }),
   reject: (id: string) =>
     apiFetch<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/reject`, { method: 'POST' }),
+  rename: (id: string, name: string | null) =>
+    apiFetch<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
   remove: (id: string) =>
     apiFetch<{ removed: boolean }>(`/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   pushConfig: (nodeId: string, forwarders: ForwarderConfig[]) =>

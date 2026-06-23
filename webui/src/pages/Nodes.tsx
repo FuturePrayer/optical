@@ -1,4 +1,5 @@
-import { Table, Tag, Input, Space, Button, Typography } from 'antd';
+import { Table, Tag, Input, Space, Typography, Modal, message } from 'antd';
+import { EditOutlined } from '@ant-design/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { useState } from 'react';
@@ -7,22 +8,52 @@ import type { NodeRecord } from '../api/types';
 
 const { Title } = Typography;
 
+/** Display label for a node: name if set, else truncated node_id. */
+function nodeLabel(n: NodeRecord): string {
+  return n.name || `${n.node_id.slice(0, 12)}…${n.node_id.slice(-4)}`;
+}
+
 export default function Nodes() {
   const { data: nodes, isLoading } = useQuery({ queryKey: ['nodes'], queryFn: api.nodes });
   const qc = useQueryClient();
   const [filter, setFilter] = useState('');
-  const [selected, setSelected] = useState<string[]>([]);
+  const [renameTarget, setRenameTarget] = useState<NodeRecord | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
 
-  const filtered = (nodes || []).filter((n) =>
-    n.node_id.toLowerCase().includes(filter.toLowerCase())
+  const filtered = (nodes || []).filter(
+    (n) =>
+      n.node_id.toLowerCase().includes(filter.toLowerCase()) ||
+      (n.name || '').toLowerCase().includes(filter.toLowerCase())
   );
+
+  const openRename = (n: NodeRecord) => {
+    setRenameTarget(n);
+    setRenameValue(n.name || '');
+  };
+
+  const doRename = async () => {
+    if (!renameTarget) return;
+    setRenaming(true);
+    try {
+      const name = renameValue.trim() === '' ? null : renameValue.trim();
+      await api.rename(renameTarget.node_id, name);
+      message.success(name ? `已重命名为「${name}」` : '已清除名称');
+      qc.invalidateQueries({ queryKey: ['nodes'] });
+      setRenameTarget(null);
+    } catch (e: any) {
+      message.error(`重命名失败: ${e.message}`);
+    } finally {
+      setRenaming(false);
+    }
+  };
 
   return (
     <div>
       <Title level={4}>节点列表</Title>
       <Space style={{ marginBottom: 16 }}>
         <Input.Search
-          placeholder="搜索 node_id"
+          placeholder="搜索名称或 node_id"
           allowClear
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -34,16 +65,24 @@ export default function Nodes() {
         rowKey="node_id"
         loading={isLoading}
         dataSource={filtered}
-        rowSelection={{
-          selectedRowKeys: selected,
-          onChange: (keys) => setSelected(keys as string[]),
-        }}
         pagination={{ pageSize: 20 }}
         columns={[
           {
-            title: 'node_id',
+            title: '节点',
             dataIndex: 'node_id',
-            render: (id: string) => <Link to={`/nodes/${id}`}>{id.slice(0, 12)}…{id.slice(-4)}</Link>,
+            render: (id: string, r: NodeRecord) => (
+              <Space size={4}>
+                <Link to={`/nodes/${id}`}>{nodeLabel(r)}</Link>
+                <a onClick={() => openRename(r)} title="重命名">
+                  <EditOutlined style={{ color: '#888', fontSize: 12 }} />
+                </a>
+              </Space>
+            ),
+          },
+          {
+            title: 'IP',
+            dataIndex: 'remote_addr',
+            render: (addr?: string) => addr || <span style={{ color: '#ccc' }}>—</span>,
           },
           {
             title: '状态',
@@ -69,6 +108,27 @@ export default function Nodes() {
           },
         ]}
       />
+
+      <Modal
+        title="重命名节点"
+        open={!!renameTarget}
+        onOk={doRename}
+        onCancel={() => setRenameTarget(null)}
+        confirmLoading={renaming}
+        okText="保存"
+        cancelText="取消"
+      >
+        <p style={{ color: '#888', fontSize: 12, marginBottom: 8 }}>
+          node_id: <code>{renameTarget?.node_id}</code>
+        </p>
+        <Input
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          placeholder="输入节点名称(留空清除名称,回退显示 node_id)"
+          onPressEnter={doRename}
+          autoFocus
+        />
+      </Modal>
     </div>
   );
 }

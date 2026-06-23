@@ -298,6 +298,17 @@ async fn route_api(
             json_ok(r#"{"ok":true}"#.to_string())
         }
 
+        // Rename a node (set or clear display name). Body: {"name": "..."} or {"name": null}.
+        ("POST", p) if p.starts_with("/api/nodes/") && p.ends_with("/rename") => {
+            let node_id = &p["/api/nodes/".len()..p.len() - "/rename".len()];
+            let req: RenameRequest = match serde_json::from_slice(body) {
+                Ok(r) => r,
+                Err(e) => return json_err(400, &format!("invalid request: {e}")),
+            };
+            let ok = state.registry.rename(node_id, req.name);
+            json_ok(format!(r#"{{"ok":{ok}}}"#))
+        }
+
         // Remove (revoke) a node entirely.
         ("DELETE", p) if p.starts_with("/api/nodes/") => {
             let node_id = &p["/api/nodes/".len()..];
@@ -336,6 +347,13 @@ async fn route_api(
 struct ConfigPushRequest {
     node_id: String,
     forwarders: Vec<ForwarderConfig>,
+}
+
+#[derive(Deserialize)]
+struct RenameRequest {
+    /// None or empty string clears the name (falls back to node_id display).
+    #[serde(default)]
+    name: Option<String>,
 }
 
 // ── HTTP helpers ───────────────────────────────────────────────────────────

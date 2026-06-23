@@ -60,8 +60,12 @@ export interface NodeRecord {
   config_version: number;
   forwarders: ForwarderConfig[];
   last_version: string | null;
+  // Human-friendly name (None = unnamed; UI falls back to node_id).
+  name?: string;
   // Transient fields (skipped in serde on the Rust side, so may be absent):
   online?: boolean;
+  // TCP peer address seen by the center (NAT-dependent).
+  remote_addr?: string;
   last_status?: StatusReportMsg | null;
 }
 
