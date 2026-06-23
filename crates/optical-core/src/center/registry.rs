@@ -39,6 +39,10 @@ pub struct NodeRecord {
     /// The forwarders assigned to this node (None until approved+configured).
     #[serde(default)]
     pub forwarders: Vec<ForwarderConfig>,
+    /// Node2 (tunnel server) config assigned by the center. Persists across
+    /// restarts. None = no Node2 config assigned (node uses local config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_config: Option<crate::center::proto::NodeServerConfig>,
     /// Last reported version string.
     #[serde(default)]
     pub last_version: Option<String>,
@@ -138,6 +142,7 @@ impl NodeRegistry {
                 status: NodeStatus::Pending,
                 config_version: 0,
                 forwarders: vec![],
+                server_config: None,
                 last_version: None,
                 name: None,
                 online: true,
@@ -174,11 +179,19 @@ impl NodeRegistry {
     }
 
     /// Add a node to the whitelist (approve it). Optionally assign a config.
-    pub fn approve(&self, node_id: &str, forwarders: Vec<ForwarderConfig>) -> bool {
+    /// Add a node to the whitelist (approve it). Optionally assign forwarders
+    /// and Node2 (tunnel server) configuration.
+    pub fn approve(
+        &self,
+        node_id: &str,
+        forwarders: Vec<ForwarderConfig>,
+        server_config: Option<crate::center::proto::NodeServerConfig>,
+    ) -> bool {
         let mut map = self.inner.lock().unwrap();
         if let Some(rec) = map.get_mut(node_id) {
             rec.status = NodeStatus::Approved;
             rec.forwarders = forwarders.clone();
+            rec.server_config = server_config.clone();
             rec.config_version = rec.config_version.wrapping_add(1).max(1);
             drop(map);
             self.save();
@@ -193,6 +206,7 @@ impl NodeRegistry {
                     status: NodeStatus::Approved,
                     config_version: 1,
                     forwarders,
+                    server_config,
                     last_version: None,
                     name: None,
                     online: false,
@@ -307,6 +321,9 @@ pub struct NodeApiView {
     pub status: NodeStatus,
     pub config_version: u64,
     pub forwarders: Vec<crate::config::ForwarderConfig>,
+    /// Node2 (tunnel server) config assigned by the center.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_config: Option<crate::center::proto::NodeServerConfig>,
     pub last_version: Option<String>,
     /// Human-friendly name (None = unnamed; UI shows node_id).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -329,6 +346,7 @@ impl From<&NodeRecord> for NodeApiView {
             status: r.status,
             config_version: r.config_version,
             forwarders: r.forwarders.clone(),
+            server_config: r.server_config.clone(),
             last_version: r.last_version.clone(),
             name: r.name.clone(),
             online: r.online,

@@ -2,7 +2,7 @@
 // The admin token is read from localStorage (set via the login screen) and
 // sent as a Bearer header on every request.
 
-import type { NodeCounts, NodeRecord, ForwarderConfig } from './types';
+import type { NodeCounts, NodeRecord, ForwarderConfig, NodeServerConfig } from './types';
 
 const TOKEN_KEY = 'optical_center_token';
 
@@ -58,10 +58,10 @@ export const api = {
     }),
   remove: (id: string) =>
     apiFetch<{ removed: boolean }>(`/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  pushConfig: (nodeId: string, forwarders: ForwarderConfig[]) =>
+  pushConfig: (nodeId: string, forwarders: ForwarderConfig[], serverConfig?: NodeServerConfig) =>
     apiFetch<{ delivered: boolean }>('/config/push', {
       method: 'POST',
-      body: JSON.stringify({ node_id: nodeId, forwarders }),
+      body: JSON.stringify({ node_id: nodeId, forwarders, server_config: serverConfig }),
     }),
 };
 

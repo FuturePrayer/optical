@@ -272,11 +272,13 @@ async fn route_api(
         // Approve a node + assign config (body = forwarders JSON array).
         ("POST", p) if p.starts_with("/api/nodes/") && p.ends_with("/approve") => {
             let node_id = &p["/api/nodes/".len()..p.len() - "/approve".len()];
-            let forwarders: Vec<ForwarderConfig> = match serde_json::from_slice(body) {
-                Ok(f) => f,
-                Err(e) => return json_err(400, &format!("invalid forwarders JSON: {e}")),
+            let req: NodeAssignment = match serde_json::from_slice(body) {
+                Ok(r) => r,
+                Err(e) => return json_err(400, &format!("invalid request: {e}")),
             };
-            let delivered = push_config(&state.registry, &state.sessions, node_id, forwarders).await;
+            let delivered = push_config(
+                &state.registry, &state.sessions, node_id, req.forwarders, req.server_config,
+            ).await;
             let _ = state
                 .hub
                 .broadcast(CenterEvent::ConfigPushed {
@@ -334,8 +336,9 @@ async fn route_api(
                 Ok(r) => r,
                 Err(e) => return json_err(400, &format!("invalid request: {e}")),
             };
-            let delivered =
-                push_config(&state.registry, &state.sessions, &req.node_id, req.forwarders).await;
+            let delivered = push_config(
+                &state.registry, &state.sessions, &req.node_id, req.forwarders, req.server_config,
+            ).await;
             json_ok(format!(r#"{{"delivered":{delivered}}}"#))
         }
 
@@ -343,10 +346,22 @@ async fn route_api(
     }
 }
 
+/// Request body for /api/nodes/:id/approve — a full node assignment.
+#[derive(Deserialize)]
+struct NodeAssignment {
+    #[serde(default)]
+    forwarders: Vec<ForwarderConfig>,
+    #[serde(default)]
+    server_config: Option<crate::center::proto::NodeServerConfig>,
+}
+
 #[derive(Deserialize)]
 struct ConfigPushRequest {
     node_id: String,
+    #[serde(default)]
     forwarders: Vec<ForwarderConfig>,
+    #[serde(default)]
+    server_config: Option<crate::center::proto::NodeServerConfig>,
 }
 
 #[derive(Deserialize)]

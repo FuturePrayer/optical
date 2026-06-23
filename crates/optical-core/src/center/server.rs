@@ -236,11 +236,12 @@ async fn run_session(
                                         }).await;
                                     }
                                 }
-                                if approved && !record.forwarders.is_empty() {
+                                if approved && (!record.forwarders.is_empty() || record.server_config.is_some()) {
                                     // Immediately push the assigned config.
                                     let push = ConfigPushMsg {
                                         config_version: record.config_version,
                                         forwarders: record.forwarders.clone(),
+                                        server_config: record.server_config.clone(),
                                     };
                                     let mut w = write.lock().await;
                                     let _ = proto::write_frame(
@@ -323,9 +324,10 @@ pub async fn push_config(
     sessions: &SessionMap,
     node_id: &str,
     forwarders: Vec<ForwarderConfig>,
+    server_config: Option<crate::center::proto::NodeServerConfig>,
 ) -> bool {
-    // approve() bumps config_version and stores the forwarders.
-    registry.approve(node_id, forwarders.clone());
+    // approve() bumps config_version and stores the forwarders + server_config.
+    registry.approve(node_id, forwarders.clone(), server_config);
     let rec = match registry.get(node_id) {
         Some(r) => r,
         None => return false,
@@ -333,6 +335,7 @@ pub async fn push_config(
     let push = ConfigPushMsg {
         config_version: rec.config_version,
         forwarders: rec.forwarders,
+        server_config: rec.server_config,
     };
     sessions.push(node_id, push).await
 }

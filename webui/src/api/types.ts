@@ -20,6 +20,13 @@ export interface ForwarderConfig {
   reverse: boolean;
 }
 
+/// Node2 (tunnel server) configuration pushed by the center.
+export interface NodeServerConfig {
+  tunnel_listen: string | null;
+  tunnel_transport: 'tcp' | 'kcp' | 'ws';
+  allow_reverse: boolean;
+}
+
 export interface Snapshot {
   uptime_secs: number;
   tunnels: TunnelSnapshot[];
@@ -59,6 +66,8 @@ export interface NodeRecord {
   status: NodeStatus;
   config_version: number;
   forwarders: ForwarderConfig[];
+  // Node2 (tunnel server) config assigned by the center.
+  server_config?: NodeServerConfig;
   last_version: string | null;
   // Human-friendly name (None = unnamed; UI falls back to node_id).
   name?: string;

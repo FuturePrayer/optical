@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Form, Input, Button, Select, Switch, Space, Card, Typography, message, Divider, Alert } from 'antd';
+import { Form, Input, Button, Select, Switch, Space, Card, Typography, message, Divider, Alert, Collapse } from 'antd';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import type { ForwarderConfig } from '../api/types';
+import type { ForwarderConfig, NodeServerConfig } from '../api/types';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -19,6 +19,11 @@ export default function ConfigPush() {
   const [rules, setRules] = useState<RuleForm[]>([]);
   const [yamlInput, setYamlInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  // Node2 (tunnel server) config form state.
+  const [enableServerConfig, setEnableServerConfig] = useState(false);
+  const [tunnelListen, setTunnelListen] = useState('');
+  const [tunnelTransport, setTunnelTransport] = useState<'tcp' | 'kcp' | 'ws'>('tcp');
+  const [allowReverse, setAllowReverse] = useState(true);
 
   const importYaml = () => {
     try {
@@ -70,9 +75,16 @@ export default function ConfigPush() {
   const submit = async () => {
     if (!targetNode) { message.warning('请选择目标节点'); return; }
     const forwarders: ForwarderConfig[] = rules.map(({ key, ...rest }) => rest);
+    const server_config: NodeServerConfig | undefined = enableServerConfig
+      ? {
+          tunnel_listen: tunnelListen.trim() === '' ? null : tunnelListen.trim(),
+          tunnel_transport: tunnelTransport,
+          allow_reverse: allowReverse,
+        }
+      : undefined;
     setSubmitting(true);
     try {
-      const res = await api.pushConfig(targetNode, forwarders);
+      const res = await api.pushConfig(targetNode, forwarders, server_config);
       message.success(res.delivered ? `已下发到节点 (${forwarders.length} 条规则)` : '已保存，节点离线时下次连上生效');
       qc.invalidateQueries({ queryKey: ['nodes'] });
     } catch (e: any) {
@@ -134,6 +146,48 @@ export default function ConfigPush() {
         ))}
       </Space>
       <Button type="dashed" style={{ marginTop: 12 }} onClick={addRule}>+ 添加规则</Button>
+
+      <Collapse
+        style={{ marginTop: 16 }}
+        items={[{
+          key: 'server',
+          label: '隧道服务端配置（Node2 · 可选）',
+          children: (
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Space>
+                <Switch checked={enableServerConfig} onChange={setEnableServerConfig} />
+                <span>{enableServerConfig ? '已启用：本次下发将覆盖节点的 Node2 配置' : '未启用：不改变节点的 Node2 配置'}</span>
+              </Space>
+              {enableServerConfig && (
+                <Space wrap>
+                  <Input
+                    addonBefore="监听地址"
+                    placeholder="0.0.0.0:9000（留空=不做 Node2）"
+                    value={tunnelListen}
+                    onChange={(e) => setTunnelListen(e.target.value)}
+                    style={{ width: 300 }}
+                  />
+                  <span>传输协议</span>
+                  <Select
+                    value={tunnelTransport}
+                    onChange={setTunnelTransport}
+                    style={{ width: 100 }}
+                    options={[
+                      { value: 'tcp', label: 'tcp' },
+                      { value: 'kcp', label: 'kcp' },
+                      { value: 'ws', label: 'ws' },
+                    ]}
+                  />
+                  <Space>
+                    <Switch checked={allowReverse} onChange={setAllowReverse} />
+                    允许反向隧道
+                  </Space>
+                </Space>
+              )}
+            </Space>
+          ),
+        }]}
+      />
 
       <Divider />
       <Alert

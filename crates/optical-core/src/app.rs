@@ -73,7 +73,22 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
     // Spawn tunnel server (Node2 role) if configured
     let mut handles = Vec::new();
 
+    // Spawn tunnel server (Node2 role) if configured locally. When the node is
+    // center-managed (has a `center:` block OR this process runs a center
+    // server), the tunnel server is managed by ConfigManager instead (it
+    // hot-restarts on config push), so we skip the local spawn here.
     if let Some(listen_addr) = config.tunnel_listen {
+        if config.center.is_some() {
+            tracing::info!(
+                "node is center-managed; local tunnel_listen ({}) will be applied by ConfigManager on first push",
+                listen_addr
+            );
+        }
+    }
+    if let Some(listen_addr) = config.tunnel_listen {
+        if config.center.is_some() {
+            // Skip — ConfigManager owns the tunnel server when center-managed.
+        } else {
         let psk = psk;
         let dsa_keypair = dsa_keypair.clone();
         let cancel = cancel.clone();
@@ -99,6 +114,7 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
                 tracing::error!("tunnel server error: {e:#}");
             }
         }));
+        }
     }
 
     // Spawn forwarders (Node1 role) if configured.
@@ -123,6 +139,9 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
             dsa_keypair.clone(),
             config.tunnel.clone(),
             tunnel_registry.clone(),
+            reverse_registry.clone(),
+            socket_buf,
+            kcp_config,
             cancel.clone(),
         );
         // ConfigManager loop consumes pushes and applies them.
@@ -217,7 +236,7 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
         {
             let self_node_id = dsa_for_selfreg.node_id();
             if registry.get(&self_node_id).is_none() {
-                registry.approve(&self_node_id, config.forwarders.clone());
+                registry.approve(&self_node_id, config.forwarders.clone(), None);
                 tracing::info!(
                     "center self-approved in whitelist, node_id={self_node_id}, {} forwarder(s) seeded",
                     config.forwarders.len()
@@ -297,6 +316,7 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
             let self_cancel = cancel.clone();
             let self_tunnel_cfg = config.tunnel.clone();
             let self_registry = tunnel_registry.clone();
+            let self_rev_registry = reverse_registry.clone();
             let self_socket_buf = config.tunnel.socket_buffer_bytes;
             let self_kcp = crate::transport::kcp::fastest_kcp_config();
             handles.push(tokio::spawn(async move {
@@ -314,6 +334,9 @@ pub async fn run_with_cancel(config_path: &str, cancel: CancellationToken) -> Re
                     self_dsa.clone(),
                     self_tunnel_cfg,
                     self_registry,
+                    self_rev_registry,
+                    self_socket_buf,
+                    self_kcp,
                     self_cancel.clone(),
                 );
                 let cm_for_loop = cm.clone();

@@ -36,8 +36,33 @@ pub struct NodeRegisterMsg {
     pub capabilities: Vec<String>,
 }
 
+/// Node2 (tunnel server) configuration that the center can push to a node.
+/// When present in a ConfigPushMsg, the node applies these as its tunnel
+/// server settings (overriding the local config.yml).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct NodeServerConfig {
+    /// Tunnel server listen address. None = don't run a tunnel server.
+    #[serde(default)]
+    pub tunnel_listen: Option<std::net::SocketAddr>,
+    /// Transport protocol for the tunnel server.
+    #[serde(default = "default_tcp")]
+    pub tunnel_transport: crate::config::TransportKind,
+    /// Whether to accept reverse tunnel registrations from peers.
+    #[serde(default = "default_true")]
+    pub allow_reverse: bool,
+}
+
+fn default_tcp() -> crate::config::TransportKind {
+    crate::config::TransportKind::Tcp
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// `ConfigPush` payload: center → node. Carries the forwarders this node
-/// should run, plus an incrementing version number.
+/// should run, optionally Node2 (tunnel server) settings, plus an
+/// incrementing version number.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ConfigPushMsg {
     /// Monotonically increasing config version assigned by the center.
@@ -45,6 +70,11 @@ pub struct ConfigPushMsg {
     /// The forwarders this node should run. Replaces the node's entire
     /// forwarder set on each push (full-state, not patch).
     pub forwarders: Vec<crate::config::ForwarderConfig>,
+    /// Node2 (tunnel server) configuration. None = leave the node's current
+    /// tunnel server settings unchanged (backwards-compatible with pushes
+    /// that only manage forwarders).
+    #[serde(default)]
+    pub server_config: Option<NodeServerConfig>,
 }
 
 /// `StatusReport` payload: node → center. Periodic liveness + metrics.

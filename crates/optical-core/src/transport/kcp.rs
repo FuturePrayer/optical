@@ -13,7 +13,9 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 
-use tokio_kcp::{KcpConfig, KcpListener, KcpNoDelayConfig, KcpStream};
+// Re-export KcpConfig so callers (e.g. config_manager) can name the type.
+pub use tokio_kcp::KcpConfig;
+use tokio_kcp::{KcpListener, KcpNoDelayConfig, KcpStream};
 
 use crate::error::Result;
 
