@@ -1,6 +1,6 @@
 [package]
 name = "optical-core"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Shared core library for optical (post-quantum encrypted tunnel) and optical-center"
 license = "Apache-2.0"

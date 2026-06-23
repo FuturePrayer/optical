@@ -1,6 +1,6 @@
 [package]
 name = "optical"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "Post-quantum encrypted tunnel forwarding tool (ML-KEM + ML-DSA + PSK)"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ name = "optical"
 path = "src/main.rs"
 
 [dependencies]
-optical-core = { path = "../optical-core", version = "0.2.1", default-features = true }
+optical-core = { path = "../optical-core", version = "0.2.2", default-features = true }
 # default-features = true → includes "node", excludes "center".
 # The optical node binary contains no config-center server code.
 
